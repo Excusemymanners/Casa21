@@ -1,0 +1,13 @@
+node_modules
+.git
+build
+dist
+.env.local
+.env
+pgdata
+.agents
+.vercel
+overvie2
+overview1
+scheme
+.DS_Store
