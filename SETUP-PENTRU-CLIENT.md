@@ -1,22 +1,26 @@
 # 🚀 OVERVIEW APP - SETUP PENTRU CLIENT
 
-## Pentru Client (Pași Simpli)
+## Varianta recomandată
 
-### Pasul 1: Descarcă și Extrage
-1. Descarcă `Overview-App-Windows.zip`
-2. Extrage cu clic dreapta → "Extract All"
+1. Clonează repository-ul din GitHub pe calculatorul tău.
+2. Intră în folderul proiectului.
+3. Rulează scriptul potrivit sistemului:
+   - Linux: `./CREATE-SHORTCUT.sh`
+   - Windows: `CREATE-SHORTCUT.bat`
 
-### Pasul 2: Crează Shortcut pe Desktop
-1. Deschide folderul extras
-2. Dublu-click pe **CREATE-SHORTCUT.bat**
-3. Gata! Vei vedea mesajul "Shortcut created successfully"
+## Pe Linux
 
-### Pasul 3: Folosește Aplicația
-1. Mergi pe Desktop
-2. Dublu-click pe icoana **Overview**
-3. App-ul se deschide automat (5-10 secunde)
-4. Bază de date se pornește singură
-5. Frontend-ul se încarcă în browser
+1. Deschide shortcut-ul `Overview.desktop` de pe Desktop.
+2. La prima pornire, aplicația instalează dependențele lipsă, construiește interfața și pornește automat.
+3. Dacă nu ai Node.js sau Docker, instalează-le o singură dată.
+
+## Pe Windows
+
+1. Asigură-te că ai instalat Docker Desktop și Node.js 22.x.
+2. Deschide folderul proiectului.
+3. Dublu-click pe **CREATE-SHORTCUT.bat**.
+4. Gata: vei vedea shortcut-ul **Overview** pe Desktop.
+5. Dublu-click pe shortcut și aplicația pornește automat.
 
 ## 🔑 Login Implicit
 ```
@@ -24,20 +28,20 @@ Username: admin
 Password: admin
 ```
 
-## ⚙️ Prerequisite-uri pe Windows
-Doar o dată la început:
-- **Docker Desktop** - https://www.docker.com/products/docker-desktop
-  - Instalează și asigură-te că rulează
+## ⚙️ Prerequisite-uri
+
+- **Node.js 22.x**
+- **Docker**
 
 ## 🎯 Ce se Întâmplă Când dai Click pe Shortcut?
 
 1. ✅ Aplicația se pornește
-2. ✅ Docker pornește baza de date PostgreSQL
-3. ✅ Backend-ul se conectează la bază
-4. ✅ Frontend-ul se deschide în browser la http://localhost:3000
-5. ✅ Gata - poți lucra!
+2. ✅ Dacă lipsesc dependențe, ele sunt instalate automat
+3. ✅ Dacă lipsește build-ul, acesta se generează automat
+4. ✅ Baza de date pornește prin Docker
+5. ✅ Fereastra aplicației se deschide direct
 
-**Nu trebuie să înțelegi cum funcționează - doar click și gata!**
+**Doar click și gata.**
 
 ## 🆘 Probleme?
 

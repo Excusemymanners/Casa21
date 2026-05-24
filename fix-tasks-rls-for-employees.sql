@@ -73,13 +73,15 @@ ON tasks
 FOR UPDATE 
 TO authenticated 
 USING (
-    -- Employee poate actualiza dacă taskul e asignat lui SAU e neasignat
-    assigned_to_email = (SELECT email FROM profiles WHERE id = auth.uid())
+    -- Employee poate actualiza dacă taskul e asignat lui (prin uuid array) SAU e asignat pe email-ul lui SAU e neasignat
+    (auth.uid() = ANY(coalesce(assigned_to, ARRAY[]::uuid[])))
+    OR assigned_to_email = (SELECT email FROM profiles WHERE id = auth.uid())
     OR assigned_to_email IS NULL
 )
 WITH CHECK (
-    -- Același check pentru update
-    assigned_to_email = (SELECT email FROM profiles WHERE id = auth.uid())
+    -- Același check pentru update (permite și când userul e în assigned_to)
+    (auth.uid() = ANY(coalesce(assigned_to, ARRAY[]::uuid[])))
+    OR assigned_to_email = (SELECT email FROM profiles WHERE id = auth.uid())
     OR assigned_to_email IS NULL
 );
 

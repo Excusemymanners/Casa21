@@ -489,3 +489,137 @@ form button[type="submit"] {
     width: 100%;
   }
 }
+
+@media (max-width: 768px) {
+  .dashboard-container {
+    padding: 12px;
+  }
+
+  .dashboard-header {
+    padding: 20px 16px;
+    border-radius: 20px;
+  }
+
+  .dashboard-header h1 {
+    font-size: 24px;
+  }
+
+  .dashboard-header p {
+    font-size: 14px;
+  }
+
+  section {
+    padding: 16px;
+    border-radius: 18px;
+  }
+
+  section h3 {
+    font-size: 18px;
+    margin-bottom: 18px;
+    padding-bottom: 12px;
+  }
+
+  .job-card,
+  .task-item,
+  .add-task-form {
+    padding: 16px;
+  }
+
+  .job-header,
+  .task-header,
+  .task-section-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 10px;
+  }
+
+  .job-title {
+    font-size: 18px;
+  }
+
+  .job-value {
+    font-size: 15px;
+  }
+
+  .job-actions,
+  .task-actions {
+    width: 100%;
+    flex-direction: column;
+  }
+
+  .job-actions button,
+  .task-actions button,
+  .task-actions label {
+    width: 100%;
+    justify-content: center;
+    min-height: 44px;
+  }
+
+  .task-info,
+  .profile-info {
+    gap: 10px;
+  }
+
+  .task-info {
+    font-size: 12px;
+  }
+
+  .btn,
+  .btn-small,
+  button {
+    width: 100%;
+    justify-content: center;
+    min-height: 44px;
+    padding: 12px 16px;
+  }
+
+  table,
+  .task-table {
+    display: block;
+    width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  table th,
+  table td,
+  .task-table th,
+  .task-table td {
+    padding: 10px 8px;
+    font-size: 12px;
+    white-space: nowrap;
+  }
+  
+  /* Specific task list mobile polish */
+  .task-list {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+
+  .task-item {
+    padding: 14px;
+    border-radius: 12px;
+    box-shadow: var(--shadow-sm);
+  }
+
+  .task-desc {
+    font-size: 13px;
+    color: var(--gray-color);
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    margin-top: 8px;
+  }
+
+  .task-meta {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-top: 10px;
+    font-size: 12px;
+    color: var(--gray-color);
+  }
+}

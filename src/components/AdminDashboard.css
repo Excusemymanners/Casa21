@@ -793,12 +793,34 @@ form button[type="submit"]:hover {
 /* Responsive Design */
 @media (max-width: 768px) {
   .dashboard-container {
-    padding: 16px;
+    padding: 12px;
   }
   
   .dashboard-header {
     flex-direction: column;
-    align-items: flex-start;
+    align-items: stretch;
+    padding: 18px 16px;
+    border-radius: 20px;
+    gap: 12px;
+  }
+
+  .dashboard-header h1 {
+    font-size: 24px;
+  }
+
+  .dashboard-header p {
+    font-size: 14px;
+  }
+
+  section {
+    padding: 16px;
+    border-radius: 18px;
+  }
+
+  section h3 {
+    font-size: 18px;
+    margin-bottom: 18px;
+    padding-bottom: 12px;
   }
   
   .job-header {
@@ -831,6 +853,24 @@ form button[type="submit"]:hover {
   .employee-actions button {
     width: 100%;
   }
+
+  .btn,
+  .btn-small,
+  .btn-primary,
+  .btn-secondary,
+  .btn-success,
+  .btn-danger,
+  .btn-warning,
+  .btn-info,
+  .action-btn,
+  button {
+    width: 100%;
+    justify-content: center;
+    min-height: 44px;
+    padding: 12px 16px;
+    font-size: 13px;
+    letter-spacing: 0.2px;
+  }
   
   .quick-stats {
     grid-template-columns: 1fr;
@@ -838,5 +878,25 @@ form button[type="submit"]:hover {
   
   .form-row {
     grid-template-columns: 1fr;
+  }
+
+  .task-table {
+    display: block;
+    width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .task-table th,
+  .task-table td {
+    padding: 10px 8px;
+    font-size: 12px;
+    white-space: nowrap;
+  }
+
+  .task-table th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
   }
 }

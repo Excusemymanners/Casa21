@@ -1,5 +1,5 @@
 import React from 'react'
-import { BrowserRouter, Route, Routes } from 'react-router-dom'
+import { HashRouter, Route, Routes } from 'react-router-dom'
 import Login from '../components/Login'
 import Signup from '../components/Signup'
 import CEODashboard from '../components/CEODashboard'
@@ -10,7 +10,7 @@ import '../theme/monochrome.css'
 
 const Router = () => {
   return (
-    <BrowserRouter>
+    <HashRouter>
       <Routes>
         {/* Rute publice */}
         <Route path="/" element={<Login />} />
@@ -48,7 +48,7 @@ const Router = () => {
           }
         />
       </Routes>
-    </BrowserRouter>
+    </HashRouter>
   );
 };
 export default Router;

@@ -42,42 +42,161 @@ module.exports = async (req, res) => {
       const existingPdfBytes = fs.readFileSync(templatePath)
       const pdfDoc = await PDFLibDocument.load(existingPdfBytes)
       const pages = pdfDoc.getPages()
+      if (!pages || pages.length === 0) return res.status(400).json({ error: 'Template PDF is empty' })
+      
       const firstPage = pages[0]
       const { width, height } = firstPage.getSize()
-          if (value === undefined || value === null || value === '') return
-          const size = (opts.size != null) ? opts.size : defaultFontSize
-          const x = (opts.x != null) ? opts.x : marginLeft
-          const y = (opts.y != null) ? opts.y : currentY
-          firstPage.drawText(`${label ? label + ' ' : ''}${value}`, { x, y, size, font: helvetica, color: pdfLibRgb(0, 0, 0) })
-          if (opts.y == null) currentY -= lineHeight
-        const lineHeight = Math.max(12, Math.round(defaultFontSize * 1.6))
+      if (!Number.isFinite(width) || !Number.isFinite(height)) {
+        return res.status(400).json({ error: 'Invalid PDF dimensions' })
+      }
+      
+      // Initialize variables for PDF rendering
+      const defaultFontSize = 12
+      const marginLeft = 50
+      // Try to embed a Unicode-capable TTF font from public/fonts (DejaVu or Noto). Fallback to standard Helvetica.
+      let helvetica = null
+      try {
+        const fontCandidates = [
+          path.join(process.cwd(), 'public', 'fonts', 'DejaVuSans.ttf'),
+          path.join(process.cwd(), 'public', 'fonts', 'NotoSans-Regular.ttf')
+        ]
+        let fontPath = null
+        for (const p of fontCandidates) if (fs.existsSync(p)) { fontPath = p; break }
+        if (fontPath) {
+          const fontBytes = fs.readFileSync(fontPath)
+          helvetica = await pdfDoc.embedFont(fontBytes)
+        }
+      } catch (e) {
+        helvetica = null
+      }
+      if (!helvetica) helvetica = await pdfDoc.embedFont(pdfLibStandardFonts.Helvetica)
+      const lineHeight = Math.max(12, Math.round(defaultFontSize * 1.6))
+      let currentY = height - marginLeft
+
+      // Helper to ensure y value is valid
+      const ensureValidY = (y) => {
+        if (!Number.isFinite(y)) {
+          console.warn('Invalid Y coordinate:', y, 'using currentY:', currentY)
+          return currentY
+        }
+        return y
+      }
+
+      // Safe decrement of currentY
+      const decrementY = (amount = lineHeight) => {
+        const safeAmount = Number.isFinite(amount) ? amount : lineHeight
+        currentY = currentY - safeAmount
+        if (!Number.isFinite(currentY)) {
+          console.warn('currentY became NaN after decrement, resetting to:', height - marginLeft)
+          currentY = height - marginLeft
+        }
+      }
+
+      // Helper to get valid option value
+      const getValidOpt = (opts, key, defaultValue) => {
+        if (!opts || !Object.prototype.hasOwnProperty.call(opts, key)) return defaultValue
+        const val = opts[key]
+        if (key === 'y' || key === 'x' || key === 'size' || key === 'width' || key === 'height' || key === 'maxWidth' || key === 'maxHeight') {
+          return Number.isFinite(val) ? val : defaultValue
+        }
+        return val != null ? val : defaultValue
+      }
+
+      // Safe drawText wrapper to ensure x/y/size are valid numbers
+      const safeDrawText = (page, text, opts = {}, fallbackY = null) => {
+        opts = opts || {}
+        const size = Number.isFinite(opts.size) ? opts.size : defaultFontSize
+        const x = Number.isFinite(opts.x) ? opts.x : marginLeft
+        let y = Number.isFinite(opts.y) ? opts.y : (fallbackY != null ? fallbackY : currentY)
+        if (!Number.isFinite(y)) {
+          console.warn('safeDrawText: invalid y for text', text, 'opts:', opts, 'using fallback', (fallbackY != null ? fallbackY : (height - marginLeft)))
+          y = (fallbackY != null ? fallbackY : (height - marginLeft))
+        }
+        page.drawText(text, { x, y, size, font: helvetica, color: pdfLibRgb(0, 0, 0) })
+      }
+
+      // Sanitize fieldBoxes from pdfData to ensure all coordinates are valid
+      if (pdfData.fieldBoxes) {
+        const sanitizedBoxes = {}
+        for (const [key, boxOpts] of Object.entries(pdfData.fieldBoxes)) {
+          if (boxOpts && typeof boxOpts === 'object') {
+            sanitizedBoxes[key] = {}
+            for (const [boxKey, boxValue] of Object.entries(boxOpts)) {
+              if (['x', 'y', 'size', 'width', 'height', 'maxWidth', 'maxHeight'].includes(boxKey)) {
+                sanitizedBoxes[key][boxKey] = Number.isFinite(boxValue) ? boxValue : undefined
+              } else {
+                sanitizedBoxes[key][boxKey] = boxValue
+              }
+            }
+          }
+        }
+        pdfData.fieldBoxes = sanitizedBoxes
+      }
+
+      // Sanitize opts object to remove NaN values
+      const sanitizeOpts = (opts) => {
+        if (!opts || typeof opts !== 'object') return {}
+        const sanitized = {}
+        for (const [key, val] of Object.entries(opts)) {
+          if (['x', 'y', 'size', 'width', 'height', 'maxWidth', 'maxHeight'].includes(key)) {
+            // Only keep numeric values
+            if (Number.isFinite(val)) {
+              sanitized[key] = val
+            }
+          } else {
+            // Keep non-numeric values as is
+            sanitized[key] = val
+          }
+        }
+        return sanitized
+      }
 
       // draw simple single-line label + value
       const draw = (label, value, opts = {}) => {
         if (value === undefined || value === null || value === '') return
-        const size = (opts.size != null) ? opts.size : defaultFontSize
-        const x = (opts.x != null) ? opts.x : marginLeft
-        const y = (opts.y != null) ? opts.y : currentY
-        firstPage.drawText(`${label ? label + ' ' : ''}${value}`, { x, y, size, font: helvetica, color: pdfLibRgb(0, 0, 0) })
-        if (opts.y == null) currentY -= lineHeight
+        opts = sanitizeOpts(opts)
+        const size = getValidOpt(opts, 'size', defaultFontSize)
+        let x = getValidOpt(opts, 'x', marginLeft)
+        x = Number.isFinite(x) ? x : marginLeft
+        let y = getValidOpt(opts, 'y', currentY)
+        y = ensureValidY(y)
+        safeDrawText(firstPage, `${label ? label + ' ' : ''}${value}`, { x, y, size }, /*fallbackY*/ null)
+        if (!opts || opts.y == null) decrementY()
       }
 
       // draw label and wrap value into multiple lines respecting maxWidth and maxHeight
       const drawWrapped = (label, value, opts = {}) => {
         if (value === undefined || value === null || value === '') {
-          if (!opts || opts.y == null) currentY -= lineHeight
+          if (!opts || opts.y == null) decrementY()
           return
         }
-        const size = (opts.size != null) ? opts.size : defaultFontSize
-        const x = (opts.x != null) ? opts.x : marginLeft
-        // prefer explicit width/height if provided
-        const availWidthTotal = (opts.width != null) ? opts.width : (opts.maxWidth != null ? opts.maxWidth : (width - marginLeft - 50))
-        const maxHeight = (opts.height != null) ? opts.height : (opts.maxHeight != null ? opts.maxHeight : (lineHeight * 4)) // default allow up to 4 lines
+        // Sanitize opts immediately at entry
+        opts = sanitizeOpts(opts)
+        const size = getValidOpt(opts, 'size', defaultFontSize)
+        let x = getValidOpt(opts, 'x', marginLeft)
+        x = Number.isFinite(x) ? x : marginLeft
+        
+        // Calculate availWidthTotal with fallback to ensure it's always valid
+        let availWidthTotal = width - marginLeft - 50
+        if (opts.width != null && Number.isFinite(opts.width)) {
+          availWidthTotal = opts.width
+        } else if (opts.maxWidth != null && Number.isFinite(opts.maxWidth)) {
+          availWidthTotal = opts.maxWidth
+        }
+        
+        // Calculate maxHeight with fallback to ensure it's always valid
+        let maxHeight = lineHeight * 4
+        if (opts.height != null && Number.isFinite(opts.height)) {
+          maxHeight = opts.height
+        } else if (opts.maxHeight != null && Number.isFinite(opts.maxHeight)) {
+          maxHeight = opts.maxHeight
+        }
 
         const labelText = label ? `${label} ` : ''
-        const y = (opts.y != null) ? opts.y : currentY
+        let y = getValidOpt(opts, 'y', currentY)
+        y = ensureValidY(y)
         const labelWidth = helvetica.widthOfTextAtSize(labelText, size)
-        if (labelText) firstPage.drawText(labelText, { x, y, size, font: helvetica, color: pdfLibRgb(0, 0, 0) })
+        if (labelText) safeDrawText(firstPage, labelText, { x, y, size }, /*fallbackY*/ null)
 
         const availWidth = Math.max(20, availWidthTotal - labelWidth)
         const words = String(value).split(/\s+/)
@@ -108,23 +227,47 @@ module.exports = async (req, res) => {
 
         const startX = x + labelWidth
         for (let i = 0; i < renderedLines.length; i++) {
-          firstPage.drawText(renderedLines[i], { x: startX, y: y - i * lineHeight, size, font: helvetica, color: pdfLibRgb(0, 0, 0) })
+          const lineY = ensureValidY(y - i * lineHeight)
+          safeDrawText(firstPage, renderedLines[i], { x: startX, y: lineY, size }, /*fallbackY*/ null)
         }
-        if (opts.y == null) currentY -= Math.max(lineHeight, renderedLines.length * lineHeight)
+        if (!opts || opts.y == null) decrementY(Math.max(lineHeight, renderedLines.length * lineHeight))
       }
 
       // Helpers to draw on an arbitrary page (page-2). Mirrors drawWrapped/drawField semantics.
       const drawWrappedOn = (page, label, value, opts = {}, pageWidth = width, pageHeight = height) => {
         if (value === undefined || value === null || value === '') return
-        const size = (opts.size != null) ? opts.size : defaultFontSize
-        const x = (opts.x != null) ? opts.x : marginLeft
-        const y = (opts.y != null) ? opts.y : (pageHeight - 120)
-        const availWidthTotal = (opts.width != null) ? opts.width : (opts.maxWidth != null ? opts.maxWidth : (pageWidth - marginLeft - 50))
-        const maxHeight = (opts.height != null) ? opts.height : (opts.maxHeight != null ? opts.maxHeight : (lineHeight * 4))
+        // Sanitize opts immediately at entry
+        opts = sanitizeOpts(opts)
+        const size = getValidOpt(opts, 'size', defaultFontSize)
+        let x = getValidOpt(opts, 'x', marginLeft)
+        x = Number.isFinite(x) ? x : marginLeft
+        
+        // Ensure pageWidth and pageHeight are valid
+        pageWidth = Number.isFinite(pageWidth) ? pageWidth : width
+        pageHeight = Number.isFinite(pageHeight) ? pageHeight : height
+        
+        let y = getValidOpt(opts, 'y', pageHeight - 120)
+        y = ensureValidY(y)
+        
+        // Calculate availWidthTotal with fallback to ensure it's always valid
+        let availWidthTotal = pageWidth - marginLeft - 50
+        if (opts.width != null && Number.isFinite(opts.width)) {
+          availWidthTotal = opts.width
+        } else if (opts.maxWidth != null && Number.isFinite(opts.maxWidth)) {
+          availWidthTotal = opts.maxWidth
+        }
+        
+        // Calculate maxHeight with fallback to ensure it's always valid
+        let maxHeight = lineHeight * 4
+        if (opts.height != null && Number.isFinite(opts.height)) {
+          maxHeight = opts.height
+        } else if (opts.maxHeight != null && Number.isFinite(opts.maxHeight)) {
+          maxHeight = opts.maxHeight
+        }
 
         const labelText = label ? `${label} ` : ''
         const labelWidth = helvetica.widthOfTextAtSize(labelText, size)
-        if (labelText) page.drawText(labelText, { x, y, size, font: helvetica, color: pdfLibRgb(0,0,0) })
+          if (labelText) safeDrawText(page, labelText, { x, y, size }, /*fallbackY*/ null)
 
         const availWidth = Math.max(20, availWidthTotal - labelWidth)
         const words = String(value).split(/\s+/)
@@ -154,16 +297,24 @@ module.exports = async (req, res) => {
 
         const startX = x + labelWidth
         for (let i = 0; i < renderedLines.length; i++) {
-          page.drawText(renderedLines[i], { x: startX, y: y - i * lineHeight, size, font: helvetica, color: pdfLibRgb(0,0,0) })
+          const lineY = ensureValidY(y - i * lineHeight)
+          safeDrawText(page, renderedLines[i], { x: startX, y: lineY, size }, /*fallbackY*/ null)
         }
       }
 
       const drawFieldOn = (page, fieldKey, label, value, defaultX = marginLeft, defaultY = null, defaultOpts = {}, pageWidth = width, pageHeight = height) => {
         const boxes = pdfData && pdfData.fieldBoxes
         const boxOpts = boxes && (boxes[fieldKey] || boxes[label])
-        const merged = Object.assign({}, defaultOpts, boxOpts || {})
-        if (merged.x == null) merged.x = defaultX
+        // Sanitize boxOpts to remove NaN values
+        const sanitizedBoxOpts = sanitizeOpts(boxOpts || {})
+        const merged = Object.assign({}, defaultOpts, sanitizedBoxOpts)
+        
+        // Validate and sanitize all merged values
+        merged.x = Number.isFinite(merged.x) ? merged.x : (Number.isFinite(defaultX) ? defaultX : marginLeft)
         if (merged.y == null && defaultY != null) merged.y = defaultY
+        merged.y = Number.isFinite(merged.y) ? merged.y : undefined
+        merged.size = Number.isFinite(merged.size) ? merged.size : undefined
+        
         if (pdfData && pdfData.noLabels) merged.noLabel = true
 
         // special handling for clientSeries
@@ -171,32 +322,39 @@ module.exports = async (req, res) => {
           const s = String(value)
           const firstPart = s.slice(0, 2)
           const restPart = s.length > 2 ? s.slice(-6) : ''
-          const part1X = (merged.part1X != null) ? merged.part1X : ((merged.x != null) ? merged.x : marginLeft)
-          const part1Y = (merged.part1Y != null) ? merged.part1Y : ((merged.y != null) ? merged.y : currentY)
+          let part1X = (merged.part1X != null) ? merged.part1X : ((merged.x != null) ? merged.x : marginLeft)
+          part1X = Number.isFinite(part1X) ? part1X : marginLeft
+          let part1Y = (merged.part1Y != null && Number.isFinite(merged.part1Y)) ? merged.part1Y : ((merged.y != null && Number.isFinite(merged.y)) ? merged.y : (pageHeight - 120))
+          part1Y = ensureValidY(part1Y)
           const baseForOffset = part1X
-          const part2X = merged.part2X != null ? merged.part2X : (baseForOffset + (merged.part2Offset != null ? merged.part2Offset : 50))
-          const part2Y = (merged.part2Y != null) ? merged.part2Y : ((merged.y != null) ? merged.y : currentY)
+          let part2X = merged.part2X != null ? merged.part2X : (baseForOffset + (merged.part2Offset != null ? merged.part2Offset : 50))
+          part2X = Number.isFinite(part2X) ? part2X : baseForOffset + 50
+          let part2Y = (merged.part2Y != null && Number.isFinite(merged.part2Y)) ? merged.part2Y : ((merged.y != null && Number.isFinite(merged.y)) ? merged.y : (pageHeight - 120))
+          part2Y = ensureValidY(part2Y)
           const size = merged.size || defaultFontSize
-          if (!merged.noLabel && label) {
-            page.drawText(`${label} `, { x: part1X, y: part1Y, size, font: helvetica, color: pdfLibRgb(0,0,0) })
+            if (!merged.noLabel && label) {
+            safeDrawText(page, `${label} `, { x: part1X, y: part1Y, size }, /*fallbackY*/ pageHeight - 120)
             const lw = helvetica.widthOfTextAtSize(`${label} `, size)
-            page.drawText(firstPart, { x: part1X + lw, y: part1Y, size, font: helvetica, color: pdfLibRgb(0,0,0) })
+            safeDrawText(page, firstPart, { x: part1X + lw, y: part1Y, size }, /*fallbackY*/ pageHeight - 120)
           } else {
-            page.drawText(firstPart, { x: part1X, y: part1Y, size, font: helvetica, color: pdfLibRgb(0,0,0) })
+            safeDrawText(page, firstPart, { x: part1X, y: part1Y, size }, /*fallbackY*/ pageHeight - 120)
           }
-          if (restPart) page.drawText(restPart, { x: part2X, y: part2Y, size, font: helvetica, color: pdfLibRgb(0,0,0) })
+          if (restPart) safeDrawText(page, restPart, { x: part2X, y: part2Y, size }, /*fallbackY*/ pageHeight - 120)
           return
         }
 
-        if (boxOpts) return drawWrappedOn(page, label, value, boxOpts, pageWidth, pageHeight)
-        return page.drawText(`${label ? label + ' ' : ''}${value}`, { x: merged.x, y: (merged.y != null) ? merged.y : (pageHeight - 120), size: (merged.size != null) ? merged.size : defaultFontSize, font: helvetica, color: pdfLibRgb(0,0,0) })
+        if (sanitizedBoxOpts && Object.keys(sanitizedBoxOpts).length > 0) return drawWrappedOn(page, label, value, sanitizedBoxOpts, pageWidth, pageHeight)
+        let finalY = (merged.y != null) ? merged.y : (pageHeight - 120)
+        finalY = ensureValidY(finalY)
+        return safeDrawText(page, `${label ? label + ' ' : ''}${value}`, { x: merged.x, y: finalY, size: (merged.size != null) ? merged.size : defaultFontSize }, /*fallbackY*/ pageHeight - 120)
       }
 
         // drawField chooses wrapped or simple rendering based on pdfData.fieldBoxes
         const drawField = (fieldKey, label, value) => {
           const boxes = pdfData && pdfData.fieldBoxes
           const boxOpts = boxes && (boxes[fieldKey] || boxes[label])
-          const merged = Object.assign({}, boxOpts || {})
+          const sanitizedBoxOpts = sanitizeOpts(boxOpts || {})
+          const merged = Object.assign({}, sanitizedBoxOpts)
           // global no-label flag
           if (pdfData && pdfData.noLabels) merged.noLabel = true
 
@@ -206,25 +364,29 @@ module.exports = async (req, res) => {
             const firstPart = s.slice(0, 2)
             const restPart = s.length > 2 ? s.slice(-6) : ''
             // compute positions: allow explicit part1X/part1Y and part2X/part2Y
-            const part1X = (merged.part1X != null) ? merged.part1X : ((merged.x != null) ? merged.x : marginLeft + 520 - marginLeft)
-            const part1Y = (merged.part1Y != null) ? merged.part1Y : ((merged.y != null) ? merged.y : currentY)
+            let part1X = (merged.part1X != null && Number.isFinite(merged.part1X)) ? merged.part1X : ((merged.x != null && Number.isFinite(merged.x)) ? merged.x : marginLeft + 520 - marginLeft)
+            part1X = Number.isFinite(part1X) ? part1X : marginLeft
+            let part1Y = (merged.part1Y != null && Number.isFinite(merged.part1Y)) ? merged.part1Y : ((merged.y != null && Number.isFinite(merged.y)) ? merged.y : currentY)
+            part1Y = ensureValidY(part1Y)
             const baseForOffset = part1X
-            const part2X = merged.part2X != null ? merged.part2X : (baseForOffset + (merged.part2Offset != null ? merged.part2Offset : 50))
-            const part2Y = (merged.part2Y != null) ? merged.part2Y : ((merged.y != null) ? merged.y : currentY)
+            let part2X = merged.part2X != null && Number.isFinite(merged.part2X) ? merged.part2X : (baseForOffset + (merged.part2Offset != null && Number.isFinite(merged.part2Offset) ? merged.part2Offset : 50))
+            part2X = Number.isFinite(part2X) ? part2X : baseForOffset + 50
+            let part2Y = (merged.part2Y != null && Number.isFinite(merged.part2Y)) ? merged.part2Y : ((merged.y != null && Number.isFinite(merged.y)) ? merged.y : currentY)
+            part2Y = ensureValidY(part2Y)
             const size = merged.size || 12
             if (!merged.noLabel && label) {
-              firstPage.drawText(`${label} `, { x: part1X, y: part1Y, size, font: helvetica, color: pdfLibRgb(0,0,0) })
+              safeDrawText(firstPage, `${label} `, { x: part1X, y: part1Y, size }, /*fallbackY*/ null)
               const lw = helvetica.widthOfTextAtSize(`${label} `, size)
-              firstPage.drawText(firstPart, { x: part1X + lw, y: part1Y, size, font: helvetica, color: pdfLibRgb(0,0,0) })
+              safeDrawText(firstPage, firstPart, { x: part1X + lw, y: part1Y, size }, /*fallbackY*/ null)
             } else {
-              firstPage.drawText(firstPart, { x: part1X, y: part1Y, size, font: helvetica, color: pdfLibRgb(0,0,0) })
+              safeDrawText(firstPage, firstPart, { x: part1X, y: part1Y, size }, /*fallbackY*/ null)
             }
-            if (restPart) firstPage.drawText(restPart, { x: part2X, y: part2Y, size, font: helvetica, color: pdfLibRgb(0,0,0) })
-            if (merged.y == null) currentY -= lineHeight
+            if (restPart) safeDrawText(firstPage, restPart, { x: part2X, y: part2Y, size }, /*fallbackY*/ null)
+            if (merged.y == null) decrementY()
             return
           }
 
-          if (boxOpts) return drawWrapped(label, value, boxOpts)
+          if (sanitizedBoxOpts && Object.keys(sanitizedBoxOpts).length > 0) return drawWrapped(label, value, sanitizedBoxOpts)
           return draw(label, value)
         }
 
@@ -238,6 +400,12 @@ module.exports = async (req, res) => {
       drawField('completedAt', 'Finalizat la', pdfData.completedAt || '')
       if (pdfData.receptionNumber) drawField('receptionNumber', 'Numar receptie', String(pdfData.receptionNumber))
 
+      // Final check before saving
+      if (!Number.isFinite(currentY)) {
+        console.warn('WARNING: currentY is invalid before save:', currentY, 'resetting to', height - marginLeft)
+        currentY = height - marginLeft
+      }
+
       const modified = await pdfDoc.save()
       res.setHeader('Content-Type', 'application/pdf')
       res.setHeader('Content-Disposition', `attachment; filename="${(pdfData.clientLastName || 'client')}_${(pdfData.jobName || 'job')}_filled.pdf"`)
@@ -245,8 +413,23 @@ module.exports = async (req, res) => {
     }
 
     // Fallback: generate a simple PDF with pdfkit
-    if (PDFKit) {
+      if (PDFKit) {
+      // For pdfkit fallback, register a Unicode-capable font if available
       const doc = new PDFKit({ size: 'A4', margin: 50 })
+      try {
+        const fontCandidates = [
+          path.join(process.cwd(), 'public', 'fonts', 'DejaVuSans.ttf'),
+          path.join(process.cwd(), 'public', 'fonts', 'NotoSans-Regular.ttf')
+        ]
+        let fontPath = null
+        for (const p of fontCandidates) if (fs.existsSync(p)) { fontPath = p; break }
+        if (fontPath) {
+          doc.registerFont('UnicodeFont', fontPath)
+          doc.font('UnicodeFont')
+        }
+      } catch (e) {
+        // ignore
+      }
       const chunks = []
       doc.on('data', c => chunks.push(c))
       doc.on('end', () => {

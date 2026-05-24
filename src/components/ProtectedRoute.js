@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import supabase from '../supabase-client';
+// auth now via Neon JWT endpoints
 
 const ProtectedRoute = ({ children, allowedRole }) => {
   const navigate = useNavigate();
@@ -10,29 +10,17 @@ const ProtectedRoute = ({ children, allowedRole }) => {
   useEffect(() => {
     const checkAuth = async () => {
       try {
-        // Pas 1: Verifică dacă e cineva logat
-        const { data: { user }, error } = await supabase.auth.getUser();
-        
-        if (error || !user) {
-          // Nimeni logat → înapoi la Login
-          navigate('/');
-          return;
-        }
-
-        // Pas 2: Ia rolul din profiles
-        const { data: profile } = await supabase
-          .from('profiles')
-          .select('role')
-          .eq('id', user.id)
-          .single();
-
-        // Pas 3: Verifică dacă rolul corespunde
-        if (profile && profile.role === allowedRole) {
-          setIsAuthorized(true);
-        } else {
-          // Rolul nu corespunde → înapoi la Login
-          navigate('/');
-        }
+        // Pas 1: Verifică token și obține user info de la server
+        const token = localStorage.getItem('access_token')
+        if (!token) { navigate('/'); return }
+        const resp = await fetch('/api/auth/me', { headers: { Authorization: `Bearer ${token}` } })
+        if (!resp.ok) { navigate('/'); return }
+        const body = await resp.json()
+        const user = body.user
+        if (!user) { navigate('/'); return }
+        // Verifică rol
+        if (user.role === allowedRole) setIsAuthorized(true)
+        else navigate('/')
       } catch (error) {
         console.error('Error checking auth:', error);
         navigate('/');

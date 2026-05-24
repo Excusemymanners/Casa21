@@ -3,57 +3,64 @@
 -- și adaugă un trigger care completează `creator_id` la INSERT atunci când lipsește.
 -- Rulează acest fișier în Supabase -> SQL editor.
 
-BEGIN;
+DO $$
+BEGIN
+  -- Only run if the column `creator_id` exists on `tasks`
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'tasks' AND column_name = 'creator_id'
+  ) THEN
+    -- 1) COPY existing values where possible
+    UPDATE tasks
+    SET creator_id = created_by
+    WHERE creator_id IS NULL
+      AND created_by IS NOT NULL;
 
--- 1) COPY existing values where possible
-UPDATE tasks
-SET creator_id = created_by
-WHERE creator_id IS NULL
-  AND created_by IS NOT NULL;
+    -- 3) Create function which sets creator_id automatically on INSERT if missing.
+    CREATE OR REPLACE FUNCTION public.tasks_set_creator_id()
+    RETURNS trigger AS $func$
+    BEGIN
+      IF NEW.creator_id IS NULL THEN
+        IF NEW.created_by IS NOT NULL THEN
+          NEW.creator_id := NEW.created_by;
+        ELSE
+          BEGIN
+            NEW.creator_id := auth.uid()::uuid;
+          EXCEPTION WHEN others THEN
+            NEW.creator_id := NULL;
+          END;
+        END IF;
+      END IF;
+      RETURN NEW;
+    END;
+    $func$ LANGUAGE plpgsql SECURITY DEFINER;
+
+    -- 4) Create trigger if not exists (idempotent)
+    DO $trig$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_trigger t
+        JOIN pg_class c ON t.tgrelid = c.oid
+        WHERE t.tgname = 'tasks_set_creator_id_trigger' AND c.relname = 'tasks'
+      ) THEN
+        CREATE TRIGGER tasks_set_creator_id_trigger
+        BEFORE INSERT ON tasks
+        FOR EACH ROW
+        EXECUTE FUNCTION public.tasks_set_creator_id();
+      END IF;
+    END;
+    $trig$;
+  ELSE
+    RAISE NOTICE 'Skipping migration: tasks.creator_id does not exist';
+  END IF;
+END;
+$$;
 
 -- 2) OPTIONAL: if you want to set a fallback for rows where both are NULL,
 -- uncomment and replace the UUID below (example uses an admin id from your export):
 -- UPDATE tasks SET creator_id = 'a5948c36-3aca-4a60-ae7b-5d533bee339d' WHERE creator_id IS NULL;
 
--- 3) Create function which sets creator_id automatically on INSERT if missing.
--- It uses, in order of preference: NEW.created_by -> auth.uid() (current user JWT) -> leaves NULL.
-CREATE OR REPLACE FUNCTION public.tasks_set_creator_id()
-RETURNS trigger AS $$
-BEGIN
-  IF NEW.creator_id IS NULL THEN
-    IF NEW.created_by IS NOT NULL THEN
-      NEW.creator_id := NEW.created_by;
-    ELSE
-      -- auth.uid() returns the authenticated user's id in Supabase (or NULL if anon)
-      BEGIN
-        NEW.creator_id := auth.uid()::uuid;
-      EXCEPTION WHEN others THEN
-        -- if casting/auth fails, leave as NULL so caller can handle or a later migration can set a fallback
-        NEW.creator_id := NULL;
-      END;
-    END IF;
-  END IF;
-  RETURN NEW;
-END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
-
--- 4) Create trigger if not exists (idempotent)
-DO $$
-BEGIN
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_trigger t
-    JOIN pg_class c ON t.tgrelid = c.oid
-    WHERE t.tgname = 'tasks_set_creator_id_trigger' AND c.relname = 'tasks'
-  ) THEN
-    CREATE TRIGGER tasks_set_creator_id_trigger
-    BEFORE INSERT ON tasks
-    FOR EACH ROW
-    EXECUTE FUNCTION public.tasks_set_creator_id();
-  END IF;
-END;
-$$;
-
-COMMIT;
+-- end
 
 -- 5) Verification query (run separately to inspect results):
 -- SELECT id, created_by, creator_id FROM tasks WHERE creator_id IS NULL OR created_by IS NULL LIMIT 200;

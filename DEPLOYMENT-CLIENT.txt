@@ -1,0 +1,71 @@
+✅ OVERVIEW APP - GATA PENTRU CLIENT!
+
+CUM FUNCTIONEAZA (PENTRU CLIENT):
+==================================
+
+1. DESCARCA
+   - Overview-App-Windows.zip (184 MB)
+
+2. EXTRAGE
+   - Clic dreapta pe ZIP → "Extract All"
+
+3. CREARE SHORTCUT (O SINGURA DATA)
+   - Deschide folderul extras
+   - Dublu-click pe CREATE-SHORTCUT.bat
+   - Vei vedea: "Shortcut created successfully"
+
+4. FOLOSEAZA
+   - Dublu-click pe icoana Overview de pe Desktop
+   - Asteapta 5-10 secunde
+   - APP-UL SE DESCHIDE AUTOMAT! 🎉
+
+COMPONENTE INCLUSE:
+===================
+✓ Overview.exe - Aplicația (159 MB)
+✓ CREATE-SHORTCUT.bat - Creeaza shortcut pe desktop
+✓ RUN-APP.bat - Lansator alternativ
+✓ RUN-APP.ps1 - Lansator PowerShell
+✓ Documentație în EN și RO
+
+CE SE INTAMPLA CAND DAI CLICK:
+===============================
+1. Docker porneste baza de date (5-10 sec)
+2. Backend-ul se conecteaza
+3. Frontend-ul se deschide în browser
+4. GATA! Poți lucra
+
+LOGIN:
+  Username: admin
+  Password: admin
+
+PREREQUISITE WINDOWS:
+=====================
+DOAR O DATA:
+- Docker Desktop (https://www.docker.com)
+  (Instalează și asigură-te că rulează)
+
+ACCES PE TELEFON/TABLETA:
+=========================
+- Pe același WiFi
+- URL: http://[IP-COMPUTER]:3000
+- Exemplu: http://192.168.1.100:3000
+- SAU: Scanează QR codul din login
+
+FISIERE IMPORTANTE:
+===================
+- Overview-App-Windows.zip ← ACEASTA TRIMITI LA CLIENT
+- dist/win-unpacked/Overview.exe ← Executabilul principal
+- CREATE-SHORTCUT.bat ← Creeaza shortcut
+- SETUP-PENTRU-CLIENT.md ← Instructiuni în RO
+
+INSTRUCTIUNI SIMPLU PENTRU CLIENT:
+==================================
+
+1. Descarca Overview-App-Windows.zip
+2. Extrage pe Desktop
+3. Deschide folderul
+4. Dublu-click CREATE-SHORTCUT.bat
+5. Click pe shortcut Overview de pe Desktop
+6. GATA!
+
+GATA PENTRU DEPLOY! 🚀

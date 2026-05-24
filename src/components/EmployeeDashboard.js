@@ -2,8 +2,10 @@ import React, { useEffect, useState } from 'react'
 import supabase from '../supabase-client'
 import { sendJobCompletionEmail, sendTaskCompletionEmail, areAllTasksCompleted } from '../emailService'
 import './EmployeeDashboard.css'
+import { useNavigate } from 'react-router-dom'
 
 const EmployeeDashboard = () => {
+  const navigate = useNavigate()
   const [user, setUser] = useState(null)
   const [userProfile, setUserProfile] = useState(null)
   const [jobs, setJobs] = useState([])
@@ -18,28 +20,47 @@ const EmployeeDashboard = () => {
 
   // Stare pentru task expandat
   const [expandedTask, setExpandedTask] = useState(null)
+  // Stare pentru dropdown-ul de "mai mult" (overflow) din fiecare task
+  const [overflowTask, setOverflowTask] = useState(null)
+  // Stare pentru meniul de actiuni task (pe mobil)
+  const [taskMenuOpen, setTaskMenuOpen] = useState(null)
+  const [isMobile, setIsMobile] = useState(typeof window !== 'undefined' ? window.innerWidth < 700 : false)
 
   // Stare calendar
   const [showCalendar, setShowCalendar] = useState(false)
   const [currentMonth, setCurrentMonth] = useState(new Date())
   const [selectedDate, setSelectedDate] = useState(null)
 
+  const handleLogout = () => {
+    try { localStorage.removeItem('access_token') } catch (e) {}
+    navigate('/')
+    setTimeout(() => window.location.reload(), 50)
+  }
+
+  useEffect(() => {
+    const onResize = () => setIsMobile(window.innerWidth < 700)
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [])
   useEffect(() => {
     const getUser = async () => {
       const { data: { user: u } } = await supabase.auth.getUser()
       setUser(u)
       if (u) {
-        // Găsește profilul utilizatorului curent
+        // Găsește profilul utilizatorului curent după email, nu după id-ul auth
         const { data: profile } = await supabase
           .from('profiles')
           .select('*')
-          .eq('id', u.id)
+          .eq('email', u.email)
           .single()
-        setUserProfile(profile)
+
+        const profileRow = profile || null
+        setUserProfile(profileRow || { id: u.id, email: u.email, full_name: u.email?.split('@')?.[0] || 'Employee', role: 'employee' })
       }
     }
     getUser()
   }, [])
+
 
   useEffect(() => {
     if (userProfile) {
@@ -74,7 +95,7 @@ const EmployeeDashboard = () => {
         throw profilesRes.error
       }
 
-      console.log('👤 User Profile Email:', userProfile.email)
+      console.log('👤 User Profile Email:', userProfile?.email)
       console.log('📋 All Tasks:', tasksRes.data)
       console.log('🔍 Tasks assigned_to_email values:', tasksRes.data?.map(t => ({ id: t.id, name: t.name, assigned_to_email: t.assigned_to_email })))
 
@@ -100,7 +121,7 @@ const EmployeeDashboard = () => {
       // 1. Găsește joburile unde are taskuri asignate SAU taskuri neasignate
       const myRelevantJobIds = [...new Set(
         allTasks
-          .filter(t => (t.assigned_to_emails && t.assigned_to_emails.includes(userProfile.email)) || (t.assigned_to_emails && t.assigned_to_emails.length === 0))
+          .filter(t => (t.assigned_to_emails && t.assigned_to_emails.includes(userProfile?.email)) || (t.assigned_to_emails && t.assigned_to_emails.length === 0))
           .map(t => t.job_id)
       )]
       
@@ -167,15 +188,14 @@ const EmployeeDashboard = () => {
     const now = new Date()
     let workingHours = hours
     let currentDate = new Date(now)
-    
+
     while (workingHours > 0) {
       const dayOfWeek = currentDate.getDay()
       if (dayOfWeek !== 0 && dayOfWeek !== 6) {
         workingHours -= 8
+        if (workingHours <= 0) break
       }
-      if (workingHours > 0) {
-        currentDate.setDate(currentDate.getDate() + 1)
-      }
+      currentDate.setDate(currentDate.getDate() + 1)
     }
     return currentDate
   }
@@ -187,37 +207,30 @@ const EmployeeDashboard = () => {
   }
 
   const toggleComplete = async (task) => {
-    // Verifică dacă employee-ul poate completa acest task
     const assignedEmails = task.assigned_to_emails || []
-    const canComplete = assignedEmails.length === 0 || assignedEmails.includes(userProfile.email)
-    
+    const canComplete = assignedEmails.length === 0 || assignedEmails.includes(userProfile?.email)
+
     if (!canComplete) {
       setMessage('⚠️ Nu poți completa acest task - este asignat altcuiva!')
       setTimeout(() => setMessage(null), 3000)
       return
     }
-    
-    // Employee poate doar să marcheze ca completed, NU poate face undo
-    if (task.status === 'completed') {
-      return // Nu face nimic dacă task-ul e deja completat
-    }
 
-    const newStatus = 'completed'
-    const updates = {
-      status: newStatus,
-      completed_by: user.email,
-      completed_by_email: user.email,
-      completed_at: new Date().toISOString()
-    }
-    setLoading(true)
+    if (task.status === 'completed') return
+
     try {
-      const { data, error: err } = await supabase.from('tasks').update(updates).eq('id', task.id).select()
-      if (err) throw err
-      
-      // Actualizează lista de task-uri
-      const updatedTask = data[0]
+      setLoading(true)
+      const token = localStorage.getItem('access_token')
+      const resp = await fetch('/api/tasks/complete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: token ? `Bearer ${token}` : '' },
+        body: JSON.stringify({ id: task.id })
+      })
+      const body = await resp.json()
+      if (!resp.ok) throw new Error(body.error || 'Failed to complete task')
+
+      const updatedTask = body.data
       const updatedTasks = tasks.map(t => t.id === task.id ? updatedTask : t)
-      // preserve creation order after update
       updatedTasks.sort((a, b) => {
         const ta = a.created_at ? new Date(a.created_at).getTime() : 0
         const tb = b.created_at ? new Date(b.created_at).getTime() : 0
@@ -225,82 +238,41 @@ const EmployeeDashboard = () => {
       })
       setTasks(updatedTasks)
 
-      // find the job related to this task
       const job = jobs.find(j => j.id === task.job_id)
+      if (job) {
+        await sendTaskCompletionEmail({
+          to: job.client_email,
+          clientName: job.client_name,
+          jobName: job.name,
+          taskName: task.name,
+          taskDescription: task.description,
+          taskValue: task.value,
+          completedAt: updatedTask.completed_at
+        })
 
-      // Send per-task email when employee completes a task (include client + assigned employees)
-      try {
-        const assignedIds = Array.isArray(updatedTask.assigned_to) ? updatedTask.assigned_to : (updatedTask.assigned_to ? [updatedTask.assigned_to] : [])
-        const assignedEmails = assignedIds.map(pid => (profiles.find(p => p.id === pid) || {}).email).filter(Boolean)
-        const taskRecipients = Array.from(new Set([...(job && job.client_email ? [job.client_email] : []), ...assignedEmails, userProfile?.email].filter(Boolean)))
-
-        if (taskRecipients.length > 0) {
-          await sendTaskCompletionEmail({
-            to: taskRecipients,
-            clientName: job ? job.client_name : null,
-            jobName: job ? job.name : null,
-            taskName: updatedTask.name,
-            taskDescription: updatedTask.description,
-            taskValue: updatedTask.value,
-            completedAt: updatedTask.completed_at
+        if (areAllTasksCompleted(updatedTasks, task.job_id)) {
+          const totalValue = updatedTasks
+            .filter(t => t.job_id === task.job_id)
+            .reduce((s, t) => s + (parseFloat(t.value) || 0), 0)
+          await sendJobCompletionEmail({
+            to: job.client_email,
+            clientName: job.client_name,
+            jobName: job.name,
+            tasks: updatedTasks.filter(t => t.job_id === task.job_id),
+            totalValue,
+            completedAt: new Date().toISOString(),
+            clientCNP: job.client_cnp,
+            clientSeries: job.client_id_series,
+            clientAddress: job.client_address
           })
         }
-      } catch (err) {
-        console.warn('Task email failed', err)
       }
 
-      // Now check if the whole job is completed and send job-level email to client + all assigned employees
-      const jobTasks = updatedTasks.filter(t => t.job_id === task.job_id)
-      const remainingTasks = jobTasks.filter(t => t.status !== 'completed').length
-
-      if (remainingTasks === 0 && job) {
-        const totalValue = (jobTasks || []).reduce((s, t) => s + (parseFloat(t.value) || 0), 0)
-        const completedAt = new Date().toISOString()
-
-        // compute all assigned employees across job tasks
-        const allAssignedIds = jobTasks.reduce((acc, t) => {
-          const ids = Array.isArray(t.assigned_to) ? t.assigned_to : (t.assigned_to ? [t.assigned_to] : [])
-          return acc.concat(ids)
-        }, [])
-        const allAssignedEmails = Array.from(new Set(allAssignedIds.map(pid => (profiles.find(p => p.id === pid) || {}).email).filter(Boolean)))
-        const jobRecipients = Array.from(new Set([...(job.client_email ? [job.client_email] : []), ...allAssignedEmails]))
-
-        // mark job as completed in DB so UI and other roles see consistent state
-        try {
-          await supabase.from('jobs').update({ status: 'completed', completed_at: completedAt }).eq('id', job.id)
-          setJobs(prev => prev.map(j => j.id === job.id ? { ...j, status: 'completed', completed_at: completedAt } : j))
-        } catch (updErr) {
-          console.warn('Could not update job status to completed', updErr)
-        }
-
-        // send job-level email
-        try {
-          if (jobRecipients.length > 0) {
-            const res = await sendJobCompletionEmail({
-              to: jobRecipients,
-              clientName: job.client_name,
-              jobName: job.name,
-              tasks: jobTasks,
-              totalValue,
-              completedAt,
-              clientCNP: job.client_cnp,
-              clientSeries: job.client_id_series,
-              clientAddress: job.client_address
-            })
-            if (res && !res.ok) console.warn('⚠️ Job email failed', res)
-          }
-        } catch (err) {
-          console.error('Job email error', err)
-        }
-
-        setMessage('✅ Task completat! 🎉 Jobul este finalizat!')
-      } else {
-        setMessage(`✅ Task completat! (Mai sunt ${remainingTasks} task-uri în job)`)
-      }
-        setTimeout(() => setMessage(null), 4000)
+      setMessage('✅ Task completat cu succes!')
+      setTimeout(() => setMessage(null), 3000)
     } catch (err) {
-      console.error(err)
-      setError(err.message || 'Eroare la actualizare status')
+      console.error('Complete task error', err)
+      setError(err.message || 'Eroare la completare task')
     } finally {
       setLoading(false)
     }
@@ -587,14 +559,19 @@ const EmployeeDashboard = () => {
 
   return (
     <div className="dashboard-container">
-      <div className="dashboard-header">
+      <div className="dashboard-header" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
         <div>
           <h1>Employee Dashboard</h1>
           <p>Bine ai venit, <strong>{userProfile?.full_name || userProfile?.email || 'Employee'}</strong>!</p>
         </div>
-        <button onClick={() => setShowCalendar(s => !s)} className="btn btn-success">
-          📅 Calendar
-        </button>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <button onClick={() => setShowCalendar(s => !s)} className="btn btn-success">
+            📅 Calendar
+          </button>
+          <button onClick={handleLogout} className="btn btn-outline-danger">
+            🚪 Logout
+          </button>
+        </div>
         {showCalendar && renderCalendar()}
       </div>
 
@@ -623,34 +600,53 @@ const EmployeeDashboard = () => {
 
             return (
               <div key={job.id} style={{ marginBottom: 16, padding: 12, border: '1px solid #ccc', borderRadius: 8 }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                  <div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                          <strong>📁 {idx + 1}. {job.name}</strong>
-                          {job.order_number && <span style={{ padding: '4px 8px', borderRadius: 6, fontSize: 12, color: 'white', backgroundColor: '#2196F3' }}>Nr. {job.order_number}</span>}
-                          <span> - {job.client_name} ({job.status})</span>
-                        </div>
-                        
-                        <div style={{ fontSize: 12, color: '#333' }}>💰 Valoare job: {job.total_value != null ? parseFloat(job.total_value).toFixed(2) + ' lei' : 'N/A'}</div>
-                        <div style={{ fontSize: 12, color: '#4CAF50', fontWeight: 'bold' }}>💵 Bani încasați: {job.amount_paid != null ? parseFloat(job.amount_paid).toFixed(2) + ' lei' : '0.00 lei'}</div>
-                    <div style={{ fontSize: 11, color: '#666' }}>
-                      ⏱️ Timp estimat: <strong>{formatDuration(totalHours)}</strong>
-                      {(() => {
-                        const earliestDeadline = jobTasks.filter(t => t.deadline).sort((a, b) => new Date(a.deadline) - new Date(b.deadline))[0];
-                        return earliestDeadline ? ` → Termen limită: ${new Date(earliestDeadline.deadline).toLocaleDateString('ro-RO', { year: 'numeric', month: 'long', day: 'numeric' })}` : '';
-                      })()}
+                {!isMobile ? (
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                    <div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                            <strong>📁 {idx + 1}. {job.name}</strong>
+                            {job.order_number && <span style={{ padding: '4px 8px', borderRadius: 6, fontSize: 12, color: 'white', backgroundColor: '#2196F3' }}>Nr. {job.order_number}</span>}
+                            <span> - {job.client_name} ({job.status})</span>
+                          </div>
+                          
+                          <div style={{ fontSize: 12, color: '#333' }}>💰 Valoare job: {job.total_value != null ? parseFloat(job.total_value).toFixed(2) + ' lei' : 'N/A'}</div>
+                          <div style={{ fontSize: 12, color: '#4CAF50', fontWeight: 'bold' }}>💵 Bani încasați: {job.amount_paid != null ? parseFloat(job.amount_paid).toFixed(2) + ' lei' : '0.00 lei'}</div>
+                      <div style={{ fontSize: 11, color: '#666' }}>
+                        ⏱️ Timp estimat: <strong>{formatDuration(totalHours)}</strong>
+                        {(() => {
+                          const earliestDeadline = jobTasks.filter(t => t.deadline).sort((a, b) => new Date(a.deadline) - new Date(b.deadline))[0];
+                          return earliestDeadline ? ` → Termen limită: ${new Date(earliestDeadline.deadline).toLocaleDateString('ro-RO', { year: 'numeric', month: 'long', day: 'numeric' })}` : '';
+                        })()}
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                      <button onClick={() => setExpandedJob(isExpanded ? null : job.id)} style={{ fontSize: 12 }}>
+                        {isExpanded ? '🔼 Ascunde' : '🔽 Detalii'}
+                      </button>
+                      <button onClick={() => downloadPdfForJob(job)} style={{ fontSize: 12 }}>📄 Descarcă PDF</button>
                     </div>
                   </div>
-                  <div style={{ display: 'flex', gap: 4 }}>
-                    <button onClick={() => setExpandedJob(isExpanded ? null : job.id)} style={{ fontSize: 12 }}>
-                      {isExpanded ? '🔼 Ascunde' : '🔽 Detalii'}
-                    </button>
-                    <button onClick={() => downloadPdfForJob(job)} style={{ fontSize: 12 }}>📄 Descarcă PDF</button>
-                  </div>
-                </div>
+                ) : (
+                  <button
+                    onClick={() => setExpandedJob(isExpanded ? null : job.id)}
+                    style={{ width: '100%', textAlign: 'left', padding: '12px 14px', borderRadius: 10, border: '1px solid #d0d7de', background: '#f8fafc', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 8 }}
+                  >
+                    <span style={{ minWidth: 0 }}>
+                      <strong style={{ display: 'block' }}>📁 {idx + 1}. {job.name}</strong>
+                      <span style={{ display: 'block', fontSize: 12, color: '#555' }}>{job.client_name} ({job.status})</span>
+                    </span>
+                    <span>{isExpanded ? '▲' : '▼'}</span>
+                  </button>
+                )}
 
                 {isExpanded && (
                   <div style={{ marginTop: 8, paddingLeft: 16, borderLeft: '3px solid #4CAF50' }}>
+                    {isMobile && (
+                      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
+                        <button onClick={() => downloadPdfForJob(job)} style={{ fontSize: 12 }}>📄 Descarcă PDF</button>
+                        <button onClick={() => setExpandedJob(null)} style={{ fontSize: 12 }}>🔼 Ascunde</button>
+                      </div>
+                    )}
                     <div style={{ fontSize: 12, color: '#555', marginBottom: 8 }}>
                       <div>Client: {job.client_name}</div>
                       <div>Email Client: {job.client_email || 'N/A'}</div>
@@ -680,45 +676,94 @@ const EmployeeDashboard = () => {
                                 )}
                               </div>
                             </div>
-                            <div style={{ display: 'flex', gap: 6 }}>
-                              <button onClick={() => setExpandedTask(isTaskExpanded ? null : task.id)} style={{ fontSize: 11 }}>
-                                {isTaskExpanded ? '🔼' : '🔽'}
-                              </button>
-                              {task.status !== 'completed' && canCompleteTask && (
-                                <button onClick={() => toggleComplete(task)} style={{ fontSize: 11 }}>
-                                  ✅ Done
-                                </button>
-                              )}
-                              {task.status !== 'completed' && !canCompleteTask && (
-                                <span style={{ fontSize: 11, color: '#999', fontStyle: 'italic', padding: '4px 8px' }}>
-                                  🔒 Altcuiva
-                                </span>
-                              )}
-                              {task.status === 'completed' && (
-                                <span style={{ fontSize: 11, color: '#4CAF50', fontWeight: 'bold', padding: '4px 8px' }}>
-                                  ✅ Completat
-                                </span>
+                            <div style={{ position: 'relative' }}>
+                              {!isMobile ? (
+                                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                                  <button onClick={() => setExpandedTask(isTaskExpanded ? null : task.id)} style={{ fontSize: 11 }}>
+                                    {isTaskExpanded ? '🔼' : '🔽'}
+                                  </button>
+                                  {task.status !== 'completed' && canCompleteTask && (
+                                    <button onClick={() => toggleComplete(task)} style={{ fontSize: 11 }}>
+                                      ✅ Done
+                                    </button>
+                                  )}
+                                  {task.status !== 'completed' && !canCompleteTask && (
+                                    <span style={{ fontSize: 11, color: '#999', fontStyle: 'italic', padding: '4px 8px' }}>
+                                      🔒 Altcuiva
+                                    </span>
+                                  )}
+                                  {task.status === 'completed' && (
+                                    <span style={{ fontSize: 11, color: '#4CAF50', fontWeight: 'bold', padding: '4px 8px' }}>
+                                      ✅ Completat
+                                    </span>
+                                  )}
+                                </div>
+                              ) : (
+                                <div>
+                                  <button onClick={() => setTaskMenuOpen(taskMenuOpen === task.id ? null : task.id)} style={{ fontSize: 16, padding: '6px 8px' }}>⋮</button>
+                                  {taskMenuOpen === task.id && (
+                                    <div style={{ position: 'absolute', right: 0, top: 32, background: 'white', border: '1px solid #ddd', borderRadius: 8, boxShadow: '0 6px 18px rgba(0,0,0,0.12)', zIndex: 60, minWidth: 160, padding: 8 }}>
+                                      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                                        <button onClick={() => { setExpandedTask(isTaskExpanded ? null : task.id); setTaskMenuOpen(null) }} style={{ textAlign: 'left' }}>{isTaskExpanded ? 'Ascunde detalii' : 'Vezi detalii'}</button>
+                                        {task.status !== 'completed' && canCompleteTask && (
+                                          <button onClick={() => { toggleComplete(task); setTaskMenuOpen(null) }} style={{ textAlign: 'left' }}>✅ Marchează ca Done</button>
+                                        )}
+                                        <button onClick={() => { setOverflowTask(overflowTask === task.id ? null : task.id); setTaskMenuOpen(null) }} style={{ textAlign: 'left' }}>{overflowTask === task.id ? 'Mai puțin' : 'Mai mult'}</button>
+                                      </div>
+                                    </div>
+                                  )}
+                                </div>
                               )}
                             </div>
                           </div>
 
                           {isTaskExpanded && (
-                            <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px solid #eee', fontSize: 12, color: '#555' }}>
-                              <div><strong>Descriere:</strong> {task.description || 'N/A'}</div>
-                              {task.completed_by && (
-                                <div style={{ marginTop: 4 }}>
-                                  <strong>Completat de:</strong> {task.completed_by}
+                              <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px solid #eee', fontSize: 12, color: '#555' }}>
+                                <div><strong>Descriere:</strong> <span className="task-desc">{task.description || 'N/A'}</span></div>
+                                <div style={{ marginTop: 6, display: 'flex', gap: 8, alignItems: 'center' }}>
+                                  {/* Primary quick actions */}
+                                  {task.status !== 'completed' && canCompleteTask && (
+                                    <button onClick={() => toggleComplete(task)} style={{ fontSize: 12 }}>✅ Done</button>
+                                  )}
+                                  {task.status === 'completed' && (
+                                    <span style={{ fontSize: 12, color: '#4CAF50', fontWeight: 'bold' }}>✅ Completat</span>
+                                  )}
+
+                                  {/* Overflow toggle: arată restul detaliilor fără a forța layout orizontal */}
+                                  <button onClick={() => setOverflowTask(overflowTask === task.id ? null : task.id)} style={{ fontSize: 12 }}>
+                                    {overflowTask === task.id ? '▲ Mai puțin' : '⋯ Mai mult'}
+                                  </button>
                                 </div>
-                              )}
-                              {task.completed_at && (
-                                <div style={{ marginTop: 4 }}>
-                                  <strong>Completat la:</strong> {new Date(task.completed_at).toLocaleString('ro-RO')}
-                                </div>
-                              )}
-                              <div style={{ marginTop: 4 }}>
-                                <strong>Creat la:</strong> {new Date(task.created_at).toLocaleString('ro-RO')}
+
+                                {/* Overflow panel - conținut detaliat, derulabil dacă e lung */}
+                                {overflowTask === task.id && (
+                                  <div style={{ marginTop: 8, padding: 8, border: '1px solid var(--border-color)', borderRadius: 8, background: '#fafafa', maxHeight: 220, overflow: 'auto' }}>
+                                    {((task.completers && task.completers.length > 0) || task.completed_by) && (
+                                      <div style={{ marginTop: 4 }}>
+                                        <strong>Completat de:</strong>{' '}
+                                        {(() => {
+                                          const list = Array.isArray(task.completers) && task.completers.length > 0 ? task.completers : (task.completed_by ? [{ id: task.completed_by, email: task.completed_by_email }] : [])
+                                          return list.map((c, idx) => {
+                                            const prof = (profiles || []).find(p => p.id === c.id)
+                                            const label = prof ? displayUserLabel(prof) : (c.email || c.id)
+                                            return `${label}${c.amount != null ? ` (${c.amount} lei)` : ''}${idx < list.length - 1 ? ', ' : ''}`
+                                          }).join('')
+                                        })()}
+                                      </div>
+                                    )}
+
+                                    {task.completed_at && (
+                                      <div style={{ marginTop: 8 }}>
+                                        <strong>Completat la:</strong> {new Date(task.completed_at).toLocaleString('ro-RO')}
+                                      </div>
+                                    )}
+
+                                    <div style={{ marginTop: 8 }}>
+                                      <strong>Creat la:</strong> {new Date(task.created_at).toLocaleString('ro-RO')}
+                                    </div>
+                                  </div>
+                                )}
                               </div>
-                            </div>
                           )}
                         </div>
                       )

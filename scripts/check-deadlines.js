@@ -2,7 +2,8 @@
 // Usage: set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY and SMTP_* env vars, then run:
 //   node scripts/check-deadlines.js
 
-require('dotenv').config()
+const { loadEnv } = require('../load-env')
+loadEnv()
 const nodemailer = require('nodemailer')
 const { createClient } = require('@supabase/supabase-js')
 

@@ -1,13 +1,16 @@
 import React, { useEffect, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import supabase from '../supabase-client'
 import { sendJobCompletionEmail, sendTaskCompletionEmail, areAllTasksCompleted } from '../emailService'
 import './AdminDashboard.css'
 
 const AdminDashboard = () => {
+  const navigate = useNavigate()
   const [user, setUser] = useState(null)
   const [jobs, setJobs] = useState([])
   const [tasks, setTasks] = useState([])
   const [profiles, setProfiles] = useState([])
+  const [users, setUsers] = useState([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
   const [message, setMessage] = useState(null)
@@ -36,6 +39,17 @@ const AdminDashboard = () => {
   const [expandedTask, setExpandedTask] = useState(null)
   const [editingTaskId, setEditingTaskId] = useState(null)
   const [taskEdits, setTaskEdits] = useState({})
+  // Stare pentru overflow (detalii lungi) per task
+  const [overflowTask, setOverflowTask] = useState(null)
+  // Meniu de actiuni per task (mobil) si detectare device mobil
+  const [taskMenuOpen, setTaskMenuOpen] = useState(null)
+  const [isMobile, setIsMobile] = useState(typeof window !== 'undefined' ? window.innerWidth < 700 : false)
+
+  useEffect(() => {
+    const onResize = () => setIsMobile(window.innerWidth < 700)
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [])
 
   // Stare pentru adăugare task la job existent
   const [addingTaskToJob, setAddingTaskToJob] = useState(null)
@@ -64,20 +78,34 @@ const AdminDashboard = () => {
     fetchData()
   }, [])
 
+  const handleLogout = () => {
+    try { localStorage.removeItem('access_token') } catch (e) {}
+    navigate('/')
+    setTimeout(() => window.location.reload(), 50)
+  }
+
+
   const fetchData = async () => {
     setLoading(true)
     setError(null)
     try {
-      const [jobsRes, tasksRes, profilesRes] = await Promise.all([
+      const [jobsRes, tasksRes, profilesRes, usersRes] = await Promise.all([
         supabase.from('jobs').select('*').order('created_at', { ascending: false }),
         supabase.from('tasks').select('*').order('created_at', { ascending: true }),
-        supabase.from('profiles').select('id, email, full_name, role, created_at')
+        supabase.from('profiles').select('id, email, full_name, role, created_at'),
+        fetch('/api/users').then(async (response) => {
+          if (!response.ok) return { data: [], error: new Error('Failed to load users') }
+          const body = await response.json()
+          return { data: body.users || [], error: null }
+        })
       ])
       if (jobsRes.error) throw jobsRes.error
       if (tasksRes.error) throw tasksRes.error
       if (profilesRes.error) throw profilesRes.error
+      if (usersRes.error) throw usersRes.error
 
       const profilesData = profilesRes.data || []
+      const usersData = usersRes.data || []
 
       // Normalize assigned_to to always be an array (DB might have scalar or array)
       const tasksNormalized = (tasksRes.data || []).map(t => {
@@ -91,6 +119,7 @@ const AdminDashboard = () => {
       setJobs(jobsRes.data || [])
       setTasks(tasksNormalized)
       setProfiles(profilesData)
+      setUsers(usersData)
     } catch (err) {
       console.error(err)
       setError(err.message || 'Eroare la încărcare date')
@@ -512,11 +541,34 @@ const AdminDashboard = () => {
 
   const toggleComplete = async (task) => {
     const newStatus = task.status === 'completed' ? 'todo' : 'completed'
-    const updates = {
-      status: newStatus,
-      completed_by: newStatus === 'completed' ? user.email : null,
-      completed_by_email: newStatus === 'completed' ? user.email : null,
-      completed_at: newStatus === 'completed' ? new Date().toISOString() : null
+    const job = jobs.find(j => j.id === task.job_id)
+
+    if (newStatus === 'completed') {
+      const existingCompleters = Array.isArray(task.completers) ? task.completers.slice() : (
+        task.completed_by ? [{ id: task.completed_by, email: task.completed_by_email, completed_at: task.completed_at }] : []
+      )
+      const already = existingCompleters.find(c => c.id === user.id)
+      if (already) {
+        setMessage('✅ Ai marcat deja acest task ca finalizat')
+        setTimeout(() => setMessage(null), 3000)
+        return
+      }
+      if (existingCompleters.length >= 2) {
+        setMessage('⚠️ Acest task are deja doi finalizatori')
+        setTimeout(() => setMessage(null), 3000)
+        return
+      }
+      const newCompleter = { id: user.id, email: user.email, completed_at: new Date().toISOString() }
+      const newCompleters = existingCompleters.concat([newCompleter])
+      const taskValue = task.value != null ? parseFloat(task.value) : null
+      if (taskValue != null) {
+        const share = parseFloat((taskValue / newCompleters.length).toFixed(2))
+        newCompleters.forEach(c => { c.amount = share })
+      }
+      var updates = { status: 'completed', completed_at: newCompleters[0] ? newCompleters[0].completed_at : new Date().toISOString(), completers: newCompleters, completed_by: newCompleters[0] ? newCompleters[0].id : null, completed_by_email: newCompleters[0] ? newCompleters[0].email : null }
+    } else {
+      // undo: clear completers and legacy fields
+      var updates = { status: 'todo', completed_at: null, completers: [], completed_by: null, completed_by_email: null }
     }
     setLoading(true)
     try {
@@ -661,15 +713,24 @@ const AdminDashboard = () => {
     setLoading(true)
     setError(null)
     try {
-      const updates = {}
-      if (profileEdits.email !== undefined) updates.email = profileEdits.email
-      if (profileEdits.full_name !== undefined) updates.full_name = profileEdits.full_name
-      if (profileEdits.role !== undefined) updates.role = profileEdits.role
+      const token = localStorage.getItem('access_token')
+      const payload = {}
+      if (profileEdits.email !== undefined) payload.email = profileEdits.email
+      if (profileEdits.full_name !== undefined) payload.full_name = profileEdits.full_name
+      if (profileEdits.role !== undefined) payload.role = profileEdits.role
 
-      const { data, error: updErr } = await supabase.from('profiles').update(updates).eq('id', profileId).select()
-      if (updErr) throw updErr
+      const resp = await fetch(`/api/profiles/${profileId}`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: token ? `Bearer ${token}` : ''
+        },
+        body: JSON.stringify(payload)
+      })
+      const body = await resp.json()
+      if (!resp.ok) throw new Error(body.error || 'Eroare la actualizare profil')
 
-      setProfiles(prev => prev.map(p => p.id === profileId ? data[0] : p))
+      setProfiles(prev => prev.map(p => p.id === profileId ? body.profile : p))
       setEditingProfileId(null)
       setProfileEdits({})
       setMessage('✅ Profil actualizat cu succes!')
@@ -730,18 +791,23 @@ const AdminDashboard = () => {
     setError(null)
     setMessage(null)
 
-    // Validări
-    if (!newProfileData.email || !newProfileData.password || !newProfileData.full_name) {
+    // Normalize & validări
+    const email = (newProfileData.email || '').trim().toLowerCase()
+    const full_name = (newProfileData.full_name || '').trim()
+    const password = newProfileData.password || ''
+    const confirmPassword = newProfileData.confirmPassword || ''
+
+    if (!email || !password || !full_name) {
       setError('❌ Email, parolă și nume sunt obligatorii!')
       return
     }
 
-    if (newProfileData.password !== newProfileData.confirmPassword) {
+    if (password !== confirmPassword) {
       setError('❌ Parolele nu se potrivesc!')
       return
     }
 
-    if (newProfileData.password.length < 6) {
+    if (password.length < 6) {
       setError('❌ Parola trebuie să aibă cel puțin 6 caractere!')
       return
     }
@@ -749,26 +815,23 @@ const AdminDashboard = () => {
     setLoading(true)
 
     try {
-      // 1. Create user in auth.users via Supabase
-      const { data: authData, error: authError } = await supabase.auth.signUp({
-        email: newProfileData.email,
-        password: newProfileData.password
+      const token = localStorage.getItem('access_token')
+      const resp = await fetch('/api/auth/register', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: token ? `Bearer ${token}` : ''
+        },
+        body: JSON.stringify({
+          email,
+          password,
+          full_name,
+          role: newProfileData.role
+        })
       })
 
-      if (authError) throw authError
-
-      const newUserId = authData.user?.id
-
-      // 2. Create profile in profiles table
-      const { error: profileError } = await supabase.from('profiles').insert([{
-        id: newUserId,
-        email: newProfileData.email,
-        full_name: newProfileData.full_name,
-        role: newProfileData.role,
-        created_at: new Date().toISOString()
-      }])
-
-      if (profileError) throw profileError
+      const body = await resp.json()
+      if (!resp.ok) throw new Error(body.error || 'Eroare la crearea profilului')
 
       // Success
       setMessage('✅ Profil nou creat cu succes!')
@@ -1045,31 +1108,62 @@ const AdminDashboard = () => {
 
   return (
     <div className="dashboard-container">
-      <div className="dashboard-header">
+      <div className="dashboard-header" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
         <div>
           <h1>Admin Dashboard</h1>
         </div>
-        <button onClick={() => setShowCalendar(s => !s)} className="btn btn-primary">
-          📅 Calendar
-        </button>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <button onClick={() => setShowCalendar(s => !s)} className="btn btn-primary">
+            📅 Calendar
+          </button>
+          <button onClick={async () => {
+          try {
+            const { generateMonthlyReportCsv, downloadCsv } = await import('../utils/generateMonthlyReportCsv')
+            const m = currentMonth.getMonth()
+            const y = currentMonth.getFullYear()
+            const csv = generateMonthlyReportCsv({ tasks, profiles, users, month: m, year: y })
+            const filename = `monthly_report_${y}_${String(m+1).padStart(2,'0')}.csv`
+            downloadCsv(csv, filename)
+          } catch (e) {
+            console.error('Export CSV error', e)
+            setError(e.message || 'Eroare export CSV')
+          }
+        }} className="btn btn-secondary">
+            ⤓ Export CSV lună curentă
+          </button>
+          <button onClick={handleLogout} className="btn btn-outline-danger">
+            🚪 Logout
+          </button>
+        </div>
         {showCalendar && renderCalendar()}
       </div>
 
       <section style={{ marginBottom: 20 }}>
         <h3>Creare job</h3>
-        <div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8 }}>
-            <button onClick={() => setShowCreateWithTasks(s => !s)}>{showCreateWithTasks ? 'Închide formular' : 'Creează job + taskuri'}</button>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8, flexWrap: 'wrap' }}>
+            <button
+              onClick={() => setShowCreateWithTasks(s => !s)}
+              className="btn btn-primary"
+              style={{
+                padding: '10px 16px',
+                fontSize: '14px',
+                fontWeight: 'bold',
+                whiteSpace: 'nowrap'
+              }}
+            >
+              {showCreateWithTasks ? '✖️ Închide formular' : '➕ Creează job + taskuri'}
+            </button>
             <div style={{ fontSize: 14, fontWeight: 'bold', color: profiles.length > 0 ? 'green' : 'red' }}>
               👥 Profiles: {profiles.length}
             </div>
-            <button onClick={fetchProfiles} style={{ fontSize: 12 }}>🔄 Reîmprospătează profile</button>
-            <button onClick={() => setShowEmployeeManagement(s => !s)} style={{ fontSize: 12, marginLeft: 'auto' }}>
+            <button onClick={fetchProfiles} className="btn btn-secondary" style={{ fontSize: 12, padding: '8px 12px' }}>🔄 Reîmprospătează</button>
+            <button onClick={() => setShowEmployeeManagement(s => !s)} className="btn btn-secondary" style={{ fontSize: 12, padding: '8px 12px', marginLeft: 'auto' }}>
               👥 {showEmployeeManagement ? 'Ascunde' : 'Gestionează'} Angajați
             </button>
             {profiles.length === 0 && (
               <span style={{ fontSize: 12, color: '#c00', marginLeft: 8 }}>
-                ⚠️ Nu sunt profile! Asigură-te că ai utilizatori înregistrați.
+                ⚠️ Nu sunt profile!
               </span>
             )}
           </div>
@@ -1314,10 +1408,7 @@ const AdminDashboard = () => {
 
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 8, minWidth: 200 }}>
                       <MultiAssignSelector profiles={profiles} selectedIds={t.assigned_to || []} onChange={v => updateNewJobTaskField(i, 'assigned_to', v)} />
-                      <div style={{ display: 'flex', gap: 8 }}>
-                        <button type="button" onClick={() => removeNewJobTask(i)} style={{ fontSize: 12, color: 'red' }}>Șterge</button>
-                        <button type="button" onClick={addNewJobTask} style={{ fontSize: 12 }}>+ Adaugă task</button>
-                      </div>
+                      <button type="button" onClick={() => removeNewJobTask(i)} style={{ fontSize: 12, color: 'red' }}>Șterge Task</button>
                     </div>
                   </div>
                 ))}
@@ -1424,49 +1515,81 @@ const AdminDashboard = () => {
                   <button onClick={cancelEditJob} style={{ fontSize: 12 }}>❌ Anulează</button>
                 </div>
               ) : (
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                    <div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                      <strong>{idx + 1}. {job.name}</strong>
-                      {job.order_number && <span style={{ padding: '4px 8px', borderRadius: 6, fontSize: 12, color: 'white', backgroundColor: '#2196F3' }}>Nr. {job.order_number}</span>}
-                      <span> - {job.client_name} ({job.status})</span>
+                !isMobile ? (
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                      <div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <strong>{idx + 1}. {job.name}</strong>
+                        {job.order_number && <span style={{ padding: '4px 8px', borderRadius: 6, fontSize: 12, color: 'white', backgroundColor: '#2196F3' }}>Nr. {job.order_number}</span>}
+                        <span> - {job.client_name} ({job.status})</span>
+                      </div>
+                      <div style={{ fontSize: 12, color: '#4CAF50', fontWeight: 'bold' }}>💵 Bani încasați: {job.amount_paid != null ? parseFloat(job.amount_paid).toFixed(2) + ' lei' : '0.00 lei'}</div>
+                      <div style={{ fontSize: 11, color: '#666' }}>
+                        ⏱️ Timp estimat: <strong>{formatDuration(totalHours)}</strong>
+                        {(() => {
+                          const earliestDeadline = jobTasks.filter(t => t.deadline).sort((a, b) => new Date(a.deadline) - new Date(b.deadline))[0];
+                          return earliestDeadline ? ` → Termen limită: ${new Date(earliestDeadline.deadline).toLocaleDateString('ro-RO', { year: 'numeric', month: 'long', day: 'numeric' })}` : '';
+                        })()}
+                      </div>
                     </div>
-                    <div style={{ fontSize: 12, color: '#4CAF50', fontWeight: 'bold' }}>💵 Bani încasați: {job.amount_paid != null ? parseFloat(job.amount_paid).toFixed(2) + ' lei' : '0.00 lei'}</div>
-                    <div style={{ fontSize: 11, color: '#666' }}>
-                      ⏱️ Timp estimat: <strong>{formatDuration(totalHours)}</strong>
-                      {(() => {
-                        const earliestDeadline = jobTasks.filter(t => t.deadline).sort((a, b) => new Date(a.deadline) - new Date(b.deadline))[0];
-                        return earliestDeadline ? ` → Termen limită: ${new Date(earliestDeadline.deadline).toLocaleDateString('ro-RO', { year: 'numeric', month: 'long', day: 'numeric' })}` : '';
-                      })()}
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                      <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                        <label style={{ fontSize: 11, color: '#333' }}>💵 Încasat:</label>
+                        <input
+                          type="number"
+                          step="0.01"
+                          min="0"
+                          value={amountPaidDraft[job.id] !== undefined ? amountPaidDraft[job.id] : (job.amount_paid != null ? job.amount_paid : '')}
+                          onChange={e => handleAmountPaidChange(job.id, e.target.value)}
+                          style={{ width: 110, padding: 6 }}
+                        />
+                        <button onClick={() => saveAmountPaid(job.id)} style={{ fontSize: 12 }}>💾</button>
+                      </div>
+                      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                        <button onClick={() => setExpandedJob(isExpanded ? null : job.id)} style={{ fontSize: 12 }}>
+                          {isExpanded ? '🔼 Ascunde' : '🔽 Detalii'}
+                        </button>
+                        <button onClick={() => startEditJob(job)} style={{ fontSize: 12 }}>✏️ Editează</button>
+                        <button onClick={() => downloadPdfForJob(job)} style={{ fontSize: 12 }}>📄 Descarcă PDF</button>
+                        <button onClick={() => deleteJob(job.id)} style={{ fontSize: 12, color: 'red' }}>🗑️ Șterge</button>
+                      </div>
                     </div>
                   </div>
-                  <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-                    <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                      <label style={{ fontSize: 11, color: '#333' }}>💵 Încasat:</label>
-                      <input
-                        type="number"
-                        step="0.01"
-                        min="0"
-                        value={amountPaidDraft[job.id] !== undefined ? amountPaidDraft[job.id] : (job.amount_paid != null ? job.amount_paid : '')}
-                        onChange={e => handleAmountPaidChange(job.id, e.target.value)}
-                        style={{ width: 110, padding: 6 }}
-                      />
-                      <button onClick={() => saveAmountPaid(job.id)} style={{ fontSize: 12 }}>💾</button>
-                    </div>
-                    <div style={{ display: 'flex', gap: 4 }}>
-                      <button onClick={() => setExpandedJob(isExpanded ? null : job.id)} style={{ fontSize: 12 }}>
-                        {isExpanded ? '🔼 Ascunde' : '🔽 Detalii'}
-                      </button>
-                      <button onClick={() => startEditJob(job)} style={{ fontSize: 12 }}>✏️ Editează</button>
-                      <button onClick={() => downloadPdfForJob(job)} style={{ fontSize: 12 }}>📄 Descarcă PDF</button>
-                      <button onClick={() => deleteJob(job.id)} style={{ fontSize: 12, color: 'red' }}>🗑️ Șterge</button>
-                    </div>
-                  </div>
-                </div>
+                ) : (
+                  <button
+                    onClick={() => setExpandedJob(isExpanded ? null : job.id)}
+                    style={{ width: '100%', textAlign: 'left', padding: '12px 14px', borderRadius: 10, border: '1px solid #d0d7de', background: '#f8fafc', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 8 }}
+                  >
+                    <span style={{ minWidth: 0 }}>
+                      <strong style={{ display: 'block' }}>{idx + 1}. {job.name}</strong>
+                      <span style={{ display: 'block', fontSize: 12, color: '#555' }}>{job.client_name} ({job.status})</span>
+                    </span>
+                    <span>{isExpanded ? '▲' : '▼'}</span>
+                  </button>
+                )
               )}
 
               {isExpanded && (
                 <div style={{ marginTop: 8, paddingLeft: 16, borderLeft: '3px solid #4CAF50' }}>
+                  {isMobile && (
+                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
+                      <button onClick={() => startEditJob(job)} style={{ fontSize: 12 }}>✏️ Editează</button>
+                      <button onClick={() => downloadPdfForJob(job)} style={{ fontSize: 12 }}>📄 Descarcă PDF</button>
+                      <button onClick={() => deleteJob(job.id)} style={{ fontSize: 12, color: 'red' }}>🗑️ Șterge</button>
+                      <div style={{ display: 'flex', gap: 6, width: '100%', alignItems: 'center', flexWrap: 'wrap' }}>
+                        <label style={{ fontSize: 11, color: '#333' }}>💵 Încasat:</label>
+                        <input
+                          type="number"
+                          step="0.01"
+                          min="0"
+                          value={amountPaidDraft[job.id] !== undefined ? amountPaidDraft[job.id] : (job.amount_paid != null ? job.amount_paid : '')}
+                          onChange={e => handleAmountPaidChange(job.id, e.target.value)}
+                          style={{ width: 120, padding: 6 }}
+                        />
+                        <button onClick={() => saveAmountPaid(job.id)} style={{ fontSize: 12 }}>💾 Salvează încasat</button>
+                      </div>
+                    </div>
+                  )}
                   <div style={{ fontSize: 12, color: '#555', marginBottom: 8 }}>
                     <div>Client Email: {job.client_email || 'N/A'}</div>
                     <div>Client Telefon: {job.client_phone || 'N/A'}</div>
@@ -1542,25 +1665,77 @@ const AdminDashboard = () => {
                                   )}
                                 </div>
                               </div>
-                              <div style={{ display: 'flex', gap: 4 }}>
-                                <button onClick={() => setExpandedTask(isTaskExpanded ? null : task.id)} style={{ fontSize: 11 }}>
-                                  {isTaskExpanded ? '🔼' : '🔽'}
-                                </button>
-                                <button onClick={() => toggleComplete(task)} style={{ fontSize: 11 }}>
-                                  {task.status === 'completed' ? '↩️ Undo' : '✅ Done'}
-                                </button>
-                                <button onClick={() => startEditTask(task)} style={{ fontSize: 11 }}>✏️</button>
-                                <button onClick={() => deleteTask(task.id)} style={{ fontSize: 11, color: 'red' }}>🗑️</button>
+                              <div style={{ position: 'relative' }}>
+                                {!isMobile ? (
+                                  <div style={{ display: 'flex', gap: 4, alignItems: 'center', flexWrap: 'wrap' }}>
+                                    <button onClick={() => setExpandedTask(isTaskExpanded ? null : task.id)} style={{ fontSize: 11 }}>
+                                      {isTaskExpanded ? '🔼' : '🔽'}
+                                    </button>
+                                    <button onClick={() => toggleComplete(task)} style={{ fontSize: 11 }}>
+                                      {task.status === 'completed' ? '↩️ Undo' : '✅ Done'}
+                                    </button>
+                                    <button onClick={() => startEditTask(task)} style={{ fontSize: 11 }}>✏️</button>
+                                    <button onClick={() => deleteTask(task.id)} style={{ fontSize: 11, color: 'red' }}>🗑️</button>
+                                    <button onClick={() => setOverflowTask(overflowTask === task.id ? null : task.id)} style={{ fontSize: 11 }}>
+                                      {overflowTask === task.id ? '▲ Mai puțin' : '⋯ Mai mult'}
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <div>
+                                    <button onClick={() => setTaskMenuOpen(taskMenuOpen === task.id ? null : task.id)} style={{ fontSize: 16, padding: '6px 8px' }}>⋮</button>
+                                    {taskMenuOpen === task.id && (
+                                      <div style={{ position: 'absolute', right: 0, top: 32, background: 'white', border: '1px solid #ddd', borderRadius: 8, boxShadow: '0 6px 18px rgba(0,0,0,0.12)', zIndex: 60, minWidth: 180, padding: 8 }}>
+                                        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                                          <button onClick={() => { setExpandedTask(isTaskExpanded ? null : task.id); setTaskMenuOpen(null) }} style={{ textAlign: 'left' }}>{isTaskExpanded ? 'Ascunde detalii' : 'Vezi detalii'}</button>
+                                          <button onClick={() => { toggleComplete(task); setTaskMenuOpen(null) }} style={{ textAlign: 'left' }}>{task.status === 'completed' ? '↩️ Undo' : '✅ Done'}</button>
+                                          <button onClick={() => { startEditTask(task); setTaskMenuOpen(null) }} style={{ textAlign: 'left' }}>✏️ Edit</button>
+                                          <button onClick={() => { deleteTask(task.id); setTaskMenuOpen(null) }} style={{ textAlign: 'left', color: 'red' }}>🗑️ Șterge</button>
+                                          <button onClick={() => { setOverflowTask(overflowTask === task.id ? null : task.id); setTaskMenuOpen(null) }} style={{ textAlign: 'left' }}>{overflowTask === task.id ? 'Mai puțin' : 'Mai mult'}</button>
+                                        </div>
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
                               </div>
                             </div>
 
                             {isTaskExpanded && (
                               <div style={{ marginTop: 8, fontSize: 12, color: '#555' }}>
                                 <div>Descriere: {task.description || 'N/A'}</div>
-                                {task.completed_by && <div>Done by: {task.completed_by}</div>}
-                                {task.completed_at && <div>Completed at: {new Date(task.completed_at).toLocaleString('ro-RO')}</div>}
-                                <div>Created at: {new Date(task.created_at).toLocaleString('ro-RO')}</div>
-                                {task.deadline && <div>Termen limită: {new Date(task.deadline).toLocaleString('ro-RO')}</div>}
+                                <div style={{ marginTop: 6, display: 'flex', gap: 8, flexWrap: 'wrap', fontSize: 12 }}>
+                                  {(Array.isArray(task.completers) && task.completers.length > 0) ? (
+                                    <div>Done by: {task.completers.map((c, i) => {
+                                      const prof = (profiles || []).find(p => p.id === c.id)
+                                      const label = prof ? displayUserLabel(prof) : (c.email || c.id)
+                                      return `${label}${c.amount != null ? ` (${c.amount} lei)` : ''}${i < task.completers.length - 1 ? ', ' : ''}`
+                                    }).join('')}</div>
+                                  ) : task.completed_by ? (
+                                    <div>Done by: {(() => {
+                                      const completer = (profiles || []).find(p => p.id === task.completed_by)
+                                      return completer ? displayUserLabel(completer) : (task.completed_by_email || task.completed_by)
+                                    })()}</div>
+                                  ) : null}
+                                </div>
+                                {task.completed_at && <div style={{ marginTop: 6 }}>Completed at: {new Date(task.completed_at).toLocaleString('ro-RO')}</div>}
+                                <div style={{ marginTop: 6 }}>Created at: {new Date(task.created_at).toLocaleString('ro-RO')}</div>
+                                {task.deadline && <div style={{ marginTop: 6 }}>Termen limită: {new Date(task.deadline).toLocaleString('ro-RO')}</div>}
+                              </div>
+                            )}
+
+                            {/* Overflow detailed panel for long content */}
+                            {overflowTask === task.id && (
+                              <div style={{ marginTop: 8, padding: 8, border: '1px solid var(--border-color)', borderRadius: 8, background: '#fafafa', maxHeight: 220, overflow: 'auto' }}>
+                                <div><strong>Descriere completă:</strong><div style={{ marginTop: 6 }}>{task.description || 'N/A'}</div></div>
+                                {(Array.isArray(task.completers) && task.completers.length > 0) && (
+                                  <div style={{ marginTop: 8 }}><strong>Completat de:</strong> {task.completers.map((c, i) => {
+                                    const prof = (profiles || []).find(p => p.id === c.id)
+                                    const label = prof ? displayUserLabel(prof) : (c.email || c.id)
+                                    return `${label}${c.amount != null ? ` (${c.amount} lei)` : ''}${i < task.completers.length - 1 ? ', ' : ''}`
+                                  }).join('')}</div>
+                                )}
+                                {task.completed_at && <div style={{ marginTop: 8 }}><strong>Completed at:</strong> {new Date(task.completed_at).toLocaleString('ro-RO')}</div>}
+                                <div style={{ marginTop: 8 }}><strong>Created at:</strong> {new Date(task.created_at).toLocaleString('ro-RO')}</div>
+                                {task.deadline && <div style={{ marginTop: 8 }}><strong>Termen limită:</strong> {new Date(task.deadline).toLocaleString('ro-RO')}</div>}
                               </div>
                             )}
                           </div>
@@ -1570,34 +1745,92 @@ const AdminDashboard = () => {
                   })}
 
                   {addingTaskToJob === job.id ? (
-                    <form onSubmit={handleAddTask} style={{ marginTop: 8, padding: 8, backgroundColor: '#f9f9f9', borderRadius: 4 }}>
-                      <input
-                        placeholder="Nume task nou"
-                        value={newTaskData.name}
-                        onChange={e => setNewTaskData(prev => ({ ...prev, name: e.target.value }))}
-                        required
-                        style={{ marginBottom: 4, width: '100%' }}
-                      />
-                      <textarea placeholder="Descriere" value={newTaskData.description || ''} onChange={e => setNewTaskData(prev => ({ ...prev, description: e.target.value }))} style={{ marginBottom: 8, width: '100%', minHeight: 80, padding: 8 }} />
-                      <div style={{ display: 'flex', gap: 12, marginBottom: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                          <label style={{ fontSize: 12 }}>Ore:</label>
-                          <input type="number" placeholder="Ore estimate" value={newTaskData.estimated_hours} onChange={e => setNewTaskData(prev => ({ ...prev, estimated_hours: e.target.value }))} style={{ width: 100, padding: 6 }} step="0.5" min="0" />
+                    <form onSubmit={handleAddTask} style={{
+                      marginTop: 12,
+                      padding: 12,
+                      backgroundColor: '#e3f2fd',
+                      borderRadius: 6,
+                      border: '2px solid #2196F3'
+                    }}>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                        <input
+                          placeholder="Nume task nou"
+                          value={newTaskData.name}
+                          onChange={e => setNewTaskData(prev => ({ ...prev, name: e.target.value }))}
+                          required
+                          style={{ padding: '8px 12px', borderRadius: 4, border: '1px solid #ccc' }}
+                        />
+                        <textarea
+                          placeholder="Descriere"
+                          value={newTaskData.description || ''}
+                          onChange={e => setNewTaskData(prev => ({ ...prev, description: e.target.value }))}
+                          style={{
+                            padding: '8px 12px',
+                            borderRadius: 4,
+                            border: '1px solid #ccc',
+                            minHeight: 80,
+                            fontFamily: 'inherit'
+                          }}
+                        />
+                        <div style={{
+                          display: 'flex',
+                          gap: 12,
+                          flexWrap: 'wrap',
+                          alignItems: 'center'
+                        }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                            <label style={{ fontSize: 12, fontWeight: 'bold', whiteSpace: 'nowrap' }}>Ore:</label>
+                            <input
+                              type="number"
+                              placeholder="Ore"
+                              value={newTaskData.estimated_hours}
+                              onChange={e => setNewTaskData(prev => ({ ...prev, estimated_hours: e.target.value }))}
+                              style={{ width: 80, padding: '6px 8px', borderRadius: 4, border: '1px solid #ccc' }}
+                              step="0.5"
+                              min="0"
+                            />
+                          </div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                            <label style={{ fontSize: 12, fontWeight: 'bold', whiteSpace: 'nowrap' }}>Termen:</label>
+                            <input
+                              type="datetime-local"
+                              value={newTaskData.deadline || ''}
+                              onChange={e => setNewTaskData(prev => ({ ...prev, deadline: e.target.value }))}
+                              style={{ padding: '6px 8px', borderRadius: 4, border: '1px solid #ccc' }}
+                            />
+                          </div>
+                          <div style={{ flex: 1, minWidth: '200px' }}>
+                            <MultiAssignSelector
+                              profiles={profiles}
+                              selectedIds={newTaskData.assigned_to || []}
+                              onChange={v => setNewTaskData(prev => ({ ...prev, assigned_to: v }))}
+                            />
+                          </div>
                         </div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                          <label style={{ fontSize: 12 }}>Termen (deadline):</label>
-                          <input type="datetime-local" value={newTaskData.deadline || ''} onChange={e => setNewTaskData(prev => ({ ...prev, deadline: e.target.value }))} style={{ padding: 6 }} />
-                        </div>
-                        {/* Admin cannot set task value here */}
-                        <div>
-                              <MultiAssignSelector profiles={profiles} selectedIds={newTaskData.assigned_to || []} onChange={v => setNewTaskData(prev => ({ ...prev, assigned_to: v }))} />
+                        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                          <button type="submit" className="btn btn-success" style={{ padding: '8px 16px', fontSize: '12px', fontWeight: 'bold' }}>
+                            ➕ Adaugă Task
+                          </button>
+                          <button type="button" onClick={cancelAddTask} className="btn btn-outline-secondary" style={{ padding: '8px 16px', fontSize: '12px' }}>
+                            Anulează
+                          </button>
                         </div>
                       </div>
-                      <button type="submit" style={{ fontSize: 11, marginRight: 4 }}>➕ Adaugă</button>
-                      <button type="button" onClick={cancelAddTask} style={{ fontSize: 11 }}>Anulează</button>
                     </form>
                   ) : (
-                    <button onClick={() => startAddTaskToJob(job.id)} style={{ fontSize: 11, marginTop: 8 }}>➕ Adaugă task nou</button>
+                    <button
+                      onClick={() => startAddTaskToJob(job.id)}
+                      className="btn btn-secondary"
+                      style={{
+                        fontSize: 12,
+                        marginTop: 12,
+                        padding: '8px 12px',
+                        fontWeight: 'bold',
+                        width: isMobile ? '100%' : 'auto'
+                      }}
+                    >
+                      ➕ Adaugă task la job
+                    </button>
                   )}
                 </div>
               )}

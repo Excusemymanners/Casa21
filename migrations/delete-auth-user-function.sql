@@ -2,6 +2,14 @@
 -- Only admin and CEO users can call this
 -- This function deletes from auth.users using the Supabase admin API via Edge Function
 
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+    CREATE ROLE authenticated NOLOGIN;
+  END IF;
+END
+$$;
+
 CREATE OR REPLACE FUNCTION delete_auth_user(user_id uuid)
 RETURNS json
 LANGUAGE plpgsql

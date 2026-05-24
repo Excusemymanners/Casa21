@@ -1,13 +1,17 @@
 import React, { useEffect, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import supabase from '../supabase-client'
 import { sendJobCompletionEmail, sendTaskCompletionEmail, areAllTasksCompleted } from '../emailService'
+import { buildMonthlyReportData, generateMonthlyReportCsv, downloadCsv } from '../utils/generateMonthlyReportCsv'
 import './AdminDashboard.css'
 
 export default function CEODashboard() {
+  const navigate = useNavigate()
   const [user, setUser] = useState(null)
   const [jobs, setJobs] = useState([])
   const [tasks, setTasks] = useState([])
   const [profiles, setProfiles] = useState([])
+  const [users, setUsers] = useState([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
   const [message, setMessage] = useState(null)
@@ -33,6 +37,16 @@ export default function CEODashboard() {
   const [expandedTask, setExpandedTask] = useState(null)
   const [editingTaskId, setEditingTaskId] = useState(null)
   const [taskEdits, setTaskEdits] = useState({})
+  // overflow panel for long task details on mobile
+  const [overflowTask, setOverflowTask] = useState(null)
+  const [taskMenuOpen, setTaskMenuOpen] = useState(null)
+  const [isMobile, setIsMobile] = useState(typeof window !== 'undefined' ? window.innerWidth < 700 : false)
+
+  useEffect(() => {
+    const onResize = () => setIsMobile(window.innerWidth < 700)
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [])
   const [addingTaskToJob, setAddingTaskToJob] = useState(null)
   const [newTaskData, setNewTaskData] = useState({ name: '', description: '', assigned_to: [], estimated_hours: '', value: '', deadline: '' })
   const [amountPaidDraft, setAmountPaidDraft] = useState({})
@@ -66,18 +80,25 @@ export default function CEODashboard() {
     setLoading(true)
     setError(null)
     try {
-      const [jobsRes, tasksRes, profilesRes] = await Promise.all([
+      const [jobsRes, tasksRes, profilesRes, usersRes] = await Promise.all([
         supabase.from('jobs').select('*').order('created_at', { ascending: false }),
         supabase.from('tasks').select('*').order('created_at', { ascending: true }),
-        supabase.from('profiles').select('id, email, full_name, role, created_at')
+        supabase.from('profiles').select('id, email, full_name, role, created_at'),
+        fetch('/api/users').then(async (response) => {
+          if (!response.ok) return { data: [], error: new Error('Failed to load users') }
+          const body = await response.json()
+          return { data: body.users || [], error: null }
+        })
       ])
       if (jobsRes.error) throw jobsRes.error
       if (tasksRes.error) throw tasksRes.error
       if (profilesRes.error) throw profilesRes.error
+      if (usersRes.error) throw usersRes.error
 
       setJobs(jobsRes.data || [])
       setTasks(tasksRes.data || [])
       setProfiles(profilesRes.data || [])
+      setUsers(usersRes.data || [])
     } catch (err) {
       console.error(err)
       setError(err.message || 'Eroare la încărcare date')
@@ -118,7 +139,19 @@ export default function CEODashboard() {
       }
 
       const jobTasks = tasks.filter(t => t.job_id === job.id).sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
-      const totalValue = (jobTasks || []).reduce((s, t) => s + (parseFloat(t.value) || 0), 0)
+      const totalValue = job.total_value != null ? parseFloat(job.total_value) : (jobTasks || []).reduce((s, t) => s + (parseFloat(t.value) || 0), 0)
+      const normalizeScalar = (value) => {
+        if (value === undefined || value === null) return null
+        if (typeof value === 'object') {
+          if (value.order_number != null) return value.order_number
+          if (value.orderNumber != null) return value.orderNumber
+          if (value.value != null) return value.value
+          if (value.id != null) return value.id
+          if (value.number != null) return value.number
+          return String(value)
+        }
+        return value
+      }
       const pdfData = {
         template: 'blank',
         clientName: job.client_name,
@@ -131,8 +164,11 @@ export default function CEODashboard() {
         totalValue,
         completedAt: job.completed_at || new Date().toISOString(),
         receptionNumber: job.reception_number || job.receptionNumber || null,
-        orderNumber: job.order_number != null ? job.order_number : (assignedOrder != null ? assignedOrder : null)
+        orderNumber: normalizeScalar(job.order_number != null ? job.order_number : (assignedOrder != null ? assignedOrder : null)),
+        users
       }
+      // Force ASCII fallback for CEO interface to avoid font encoding issues
+      pdfData.asciiFallback = true
 
       // generate client-side and download
       const { generateAndDownloadPdf } = await import('../utils/generatePdfClient')
@@ -165,6 +201,39 @@ export default function CEODashboard() {
   const displayUserLabel = (profile) => {
     if (!profile) return '(Neasignat)'
     return profile.full_name ? `${profile.full_name} (${profile.email})` : profile.email
+  }
+
+  const resolveUserLabel = (idOrEmail) => {
+    if (!idOrEmail) return null
+    const byProfile = (profiles || []).find(p => p.id === idOrEmail || p.email === idOrEmail)
+    if (byProfile) return displayUserLabel(byProfile)
+    const byUser = (users || []).find(u => u.id === idOrEmail || u.email === idOrEmail)
+    if (byUser) return byUser.full_name ? `${byUser.full_name} (${byUser.email})` : byUser.email
+    return String(idOrEmail)
+  }
+
+  const getTaskAssignedLabels = (task) => {
+    const assignedIds = Array.isArray(task?.assigned_to) ? task.assigned_to : (task?.assigned_to ? [task.assigned_to] : [])
+    if (assignedIds.length > 0) {
+      return assignedIds.map(id => {
+        const profile = (profiles || []).find(p => p.id === id)
+        return profile ? displayUserLabel(profile) : id
+      })
+    }
+    const assignedEmails = Array.isArray(task?.assigned_to_emails) ? task.assigned_to_emails : (task?.assigned_to_email ? [task.assigned_to_email] : [])
+    return assignedEmails.length > 0 ? assignedEmails : ['(Neasignat)']
+  }
+
+  const getTaskCompleterLabels = (task) => {
+    if (Array.isArray(task?.completers) && task.completers.length > 0) {
+      return task.completers.map(c => {
+        return resolveUserLabel(c.id || c.email || c.completed_by)
+      })
+    }
+    if (task?.completed_by) {
+      return [resolveUserLabel(task.completed_by_email || task.completed_by)]
+    }
+    return ['N/A']
   }
 
   // Multi-assign selector (checkbox list) to allow easy multi-selection
@@ -202,31 +271,7 @@ export default function CEODashboard() {
     return result.trim() || '0h'
   }
 
-  const calculateEstimatedDate = (hours) => {
-    if (!hours || hours <= 0) return null
-    const now = new Date()
-    let workingHours = hours
-    let currentDate = new Date(now)
-
-    while (workingHours > 0) {
-      const dayOfWeek = currentDate.getDay()
-      if (dayOfWeek !== 0 && dayOfWeek !== 6) {
-        workingHours -= 8
-      }
-      if (workingHours > 0) {
-        currentDate.setDate(currentDate.getDate() + 1)
-      }
-    }
-    return currentDate
-  }
-
-  const formatEstimatedDate = (hours) => {
-    const date = calculateEstimatedDate(hours)
-    if (!date) return ''
-    return date.toLocaleDateString('ro-RO', { year: 'numeric', month: 'long', day: 'numeric' })
-  }
-
-  // Create job with tasks
+  // Creare job cu taskuri (adaptat din AdminDashboard)
   const handleCreateJob = async (e) => {
     e.preventDefault()
     setLoading(true)
@@ -239,7 +284,6 @@ export default function CEODashboard() {
         priority: jobPriority || 'normal',
         client_name: fullClientName,
         client_phone: clientPhone || null,
-        // legacy first/last removed; frontend uses client_name only
         client_id_series: clientIdSeries || null,
         client_cnp: clientCNP || null,
         client_address: clientAddress || null,
@@ -252,46 +296,42 @@ export default function CEODashboard() {
       if (jobErr) throw jobErr
 
       const jobId = newJob[0].id
-          // Preserve insertion order by assigning incremental created_at timestamps
-          const baseCreatedAt = Date.now()
-          const tasksToInsert = newJobTasks
-            .filter(t => t.name && t.name.trim())
-            .map((t, i) => ({
-              job_id: jobId,
-              name: t.name,
-              description: t.description || null,
-              status: 'todo',
-              assigned_to: Array.isArray(t.assigned_to) ? (t.assigned_to.length > 0 ? t.assigned_to : null) : (t.assigned_to ? [t.assigned_to] : null),
-              assigned_to_emails: null,
-              estimated_hours: t.estimated_hours ? parseFloat(t.estimated_hours) : null,
-                  value: t.value ? parseFloat(t.value) : null,
-                  deadline: t.deadline ? (new Date(t.deadline)).toISOString() : null,
-              created_by: user?.id || null,
-              created_at: new Date(baseCreatedAt + i).toISOString()
-            }))
+      const filteredTasks = newJobTasks.filter(t => t.name && t.name.trim())
+      const baseCreatedAt = Date.now()
+      const tasksToInsert = filteredTasks.map((t, i) => ({
+        job_id: jobId,
+        name: t.name,
+        description: t.description || null,
+        status: 'todo',
+        assigned_to: Array.isArray(t.assigned_to) ? t.assigned_to : (t.assigned_to ? [t.assigned_to] : []),
+        assigned_to_emails: null,
+        estimated_hours: t.estimated_hours ? parseFloat(t.estimated_hours) : null,
+        value: t.value ? parseFloat(t.value) : null,
+        deadline: t.deadline ? (new Date(t.deadline)).toISOString() : null,
+        created_by: user?.id || null,
+        created_at: new Date(baseCreatedAt + i).toISOString()
+      }))
+
+      const attemptInsertTasks = async (rows) => {
+        try {
+          const { data: insertedTasks, error: tasksErr } = await supabase.from('tasks').insert(rows).select()
+          if (tasksErr) throw tasksErr
+          return insertedTasks
+        } catch (err) {
+          if (err?.message && err.message.includes('invalid input syntax for type uuid')) {
+            const transformed = rows.map(r => ({ ...r, assigned_to: Array.isArray(r.assigned_to) && r.assigned_to.length > 0 ? r.assigned_to[0] : r.assigned_to }))
+            const { data: retried, error: retryErr } = await supabase.from('tasks').insert(transformed).select()
+            if (retryErr) throw retryErr
+            return retried
+          }
+          throw err
+        }
+      }
 
       if (tasksToInsert.length > 0) {
-        // Safe insert with retry when DB still has scalar `assigned_to`.
-        const attemptInsertTasks = async (rows) => {
-          try {
-            const { data, error } = await supabase.from('tasks').insert(rows)
-            if (error) throw error
-            return data
-          } catch (err) {
-            if (err?.message && err.message.includes('invalid input syntax for type uuid')) {
-              const transformed = rows.map(r => ({ ...r, assigned_to: Array.isArray(r.assigned_to) && r.assigned_to.length > 0 ? r.assigned_to[0] : r.assigned_to }))
-              const { data: retried, error: retryErr } = await supabase.from('tasks').insert(transformed)
-              if (retryErr) throw retryErr
-              return retried
-            }
-            throw err
-          }
-        }
-
         await attemptInsertTasks(tasksToInsert)
       }
 
-      // If job value wasn't provided, set it to the sum of created tasks' values
       if (!jobValue || jobValue === '') {
         const sumTasks = (tasksToInsert || []).reduce((s, t) => s + (parseFloat(t.value) || 0), 0)
         if (sumTasks > 0) {
@@ -543,11 +583,32 @@ export default function CEODashboard() {
 
   const toggleComplete = async (task) => {
     const newStatus = task.status === 'completed' ? 'todo' : 'completed'
-    const updates = {
-      status: newStatus,
-      completed_by: newStatus === 'completed' ? user?.email : null,
-      completed_by_email: newStatus === 'completed' ? user?.email : null,
-      completed_at: newStatus === 'completed' ? new Date().toISOString() : null
+    const job = jobs.find(j => j.id === task.job_id)
+    if (newStatus === 'completed') {
+      const existingCompleters = Array.isArray(task.completers) ? task.completers.slice() : (
+        task.completed_by ? [{ id: task.completed_by, email: task.completed_by_email, completed_at: task.completed_at }] : []
+      )
+      const already = existingCompleters.find(c => c.id === user?.id)
+      if (already) {
+        setMessage('✅ Ai marcat deja acest task ca finalizat')
+        setTimeout(() => setMessage(null), 3000)
+        return
+      }
+      if (existingCompleters.length >= 2) {
+        setMessage('⚠️ Acest task are deja doi finalizatori')
+        setTimeout(() => setMessage(null), 3000)
+        return
+      }
+      const newCompleter = { id: user?.id || null, email: user?.email || null, completed_at: new Date().toISOString() }
+      const newCompleters = existingCompleters.concat([newCompleter])
+      const taskValue = task.value != null ? parseFloat(task.value) : null
+      if (taskValue != null) {
+        const share = parseFloat((taskValue / newCompleters.length).toFixed(2))
+        newCompleters.forEach(c => { c.amount = share })
+      }
+      var updates = { status: 'completed', completed_at: newCompleters[0] ? newCompleters[0].completed_at : new Date().toISOString(), completers: newCompleters, completed_by: newCompleters[0] ? newCompleters[0].id : null, completed_by_email: newCompleters[0] ? newCompleters[0].email : null }
+    } else {
+      var updates = { status: 'todo', completed_at: null, completers: [], completed_by: null, completed_by_email: null }
     }
     setLoading(true)
     try {
@@ -621,7 +682,8 @@ export default function CEODashboard() {
                 clientCNP: job.client_cnp,
                 clientSeries: job.client_id_series,
                 clientAddress: job.client_address,
-                receptionNumber
+                receptionNumber,
+                totalValue: job.total_value != null ? job.total_value : totalValue
               })
               if (res && !res.ok) console.warn('⚠️ Job email failed', res)
             } catch (err) {
@@ -704,15 +766,24 @@ export default function CEODashboard() {
     setLoading(true)
     setError(null)
     try {
-      const updates = {}
-      if (profileEdits.email !== undefined) updates.email = profileEdits.email
-      if (profileEdits.full_name !== undefined) updates.full_name = profileEdits.full_name
-      if (profileEdits.role !== undefined) updates.role = profileEdits.role
+      const token = localStorage.getItem('access_token')
+      const payload = {}
+      if (profileEdits.email !== undefined) payload.email = profileEdits.email
+      if (profileEdits.full_name !== undefined) payload.full_name = profileEdits.full_name
+      if (profileEdits.role !== undefined) payload.role = profileEdits.role
 
-      const { data, error: updErr } = await supabase.from('profiles').update(updates).eq('id', profileId).select()
-      if (updErr) throw updErr
+      const resp = await fetch(`/api/profiles/${profileId}`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: token ? `Bearer ${token}` : ''
+        },
+        body: JSON.stringify(payload)
+      })
+      const body = await resp.json()
+      if (!resp.ok) throw new Error(body.error || 'Eroare la actualizare profil')
 
-      setProfiles(prev => prev.map(p => p.id === profileId ? (data && data[0]) || p : p))
+      setProfiles(prev => prev.map(p => p.id === profileId ? body.profile : p))
       setEditingProfileId(null)
       setProfileEdits({})
       setMessage('✅ Profil actualizat cu succes!')
@@ -737,18 +808,19 @@ export default function CEODashboard() {
     setLoading(true)
     setError(null)
     try {
-      const { data, error: updErr } = await supabase.from('profiles').update({ role: newRole }).eq('id', profileId).select()
-      if (updErr) {
-        console.error('Supabase update error', updErr)
-        throw updErr
-      }
+      const token = localStorage.getItem('access_token')
+      const resp = await fetch(`/api/profiles/${profileId}`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: token ? `Bearer ${token}` : ''
+        },
+        body: JSON.stringify({ role: newRole })
+      })
+      const body = await resp.json()
+      if (!resp.ok) throw new Error(body.error || 'Eroare la actualizare rol')
 
-      if (data && data.length > 0) {
-        setProfiles(prev => prev.map(p => p.id === profileId ? data[0] : p))
-      } else {
-        // fallback: re-fetch profiles to ensure UI shows server state
-        await fetchProfiles()
-      }
+      setProfiles(prev => prev.map(p => p.id === profileId ? body.profile : p))
 
       setMessage('✅ Rol actualizat!')
       setTimeout(() => setMessage(null), 3000)
@@ -807,18 +879,23 @@ export default function CEODashboard() {
     setError(null)
     setMessage(null)
 
-    // Validări
-    if (!newProfileData.email || !newProfileData.password || !newProfileData.full_name) {
+    // Normalize & validări
+    const email = (newProfileData.email || '').trim().toLowerCase()
+    const full_name = (newProfileData.full_name || '').trim()
+    const password = newProfileData.password || ''
+    const confirmPassword = newProfileData.confirmPassword || ''
+
+    if (!email || !password || !full_name) {
       setError('❌ Email, parolă și nume sunt obligatorii!')
       return
     }
 
-    if (newProfileData.password !== newProfileData.confirmPassword) {
+    if (password !== confirmPassword) {
       setError('❌ Parolele nu se potrivesc!')
       return
     }
 
-    if (newProfileData.password.length < 6) {
+    if (password.length < 6) {
       setError('❌ Parola trebuie să aibă cel puțin 6 caractere!')
       return
     }
@@ -826,26 +903,23 @@ export default function CEODashboard() {
     setLoading(true)
 
     try {
-      // 1. Create user in auth.users via Supabase
-      const { data: authData, error: authError } = await supabase.auth.signUp({
-        email: newProfileData.email,
-        password: newProfileData.password
+      const token = localStorage.getItem('access_token')
+      const resp = await fetch('/api/auth/register', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: token ? `Bearer ${token}` : ''
+        },
+        body: JSON.stringify({
+          email,
+          password,
+          full_name,
+          role: newProfileData.role
+        })
       })
 
-      if (authError) throw authError
-
-      const newUserId = authData.user?.id
-
-      // 2. Create profile in profiles table
-      const { error: profileError } = await supabase.from('profiles').insert([{
-        id: newUserId,
-        email: newProfileData.email,
-        full_name: newProfileData.full_name,
-        role: newProfileData.role,
-        created_at: new Date().toISOString()
-      }])
-
-      if (profileError) throw profileError
+      const body = await resp.json()
+      if (!resp.ok) throw new Error(body.error || 'Eroare la crearea profilului')
 
       // Success
       setMessage('✅ Profil nou creat cu succes!')
@@ -853,8 +927,7 @@ export default function CEODashboard() {
       setShowCreateProfile(false)
       
       // Refresh profiles list
-      const { data, error: err } = await supabase.from('profiles').select('id, email, full_name, role, created_at')
-      if (!err) setProfiles(data || [])
+      await fetchProfiles()
       setTimeout(() => setMessage(null), 3000)
     } catch (err) {
       console.error(err)
@@ -873,6 +946,24 @@ export default function CEODashboard() {
     const daysInMonth = lastDay.getDate()
     const startingDayOfWeek = firstDay.getDay()
     return { daysInMonth, startingDayOfWeek, year, month }
+  }
+
+  const calculateEstimatedDate = (hours) => {
+    if (!hours || hours <= 0) return null
+    const now = new Date()
+    let workingHours = hours
+    let currentDate = new Date(now)
+
+    while (workingHours > 0) {
+      const dayOfWeek = currentDate.getDay()
+      if (dayOfWeek !== 0 && dayOfWeek !== 6) {
+        workingHours -= 8
+      }
+      if (workingHours > 0) {
+        currentDate.setDate(currentDate.getDate() + 1)
+      }
+    }
+    return currentDate
   }
 
   const getTasksForDate = (date) => {
@@ -915,122 +1006,26 @@ export default function CEODashboard() {
 
   const navigateReportMonth = (direction) => setReportMonth(prev => { const newDate = new Date(prev); newDate.setMonth(newDate.getMonth() + direction); return newDate })
 
-  const computeMonthlyReport = (monthDate) => {
-    const month = monthDate.getMonth()
-    const year = monthDate.getFullYear()
-    // Filter tasks completed in the given month
-    const completedTasks = tasks.filter(t => t.completed_at).filter(t => {
-      const d = new Date(t.completed_at)
-      return d.getMonth() === month && d.getFullYear() === year
-    })
-
-    // Group by assigned_to. If a task has multiple assignees, count it under each assignee.
-    const grouped = {}
-    completedTasks.forEach(t => {
-      const v = parseFloat(t.value) || 0
-      if (Array.isArray(t.assigned_to) && t.assigned_to.length > 0) {
-        t.assigned_to.forEach(pid => {
-          if (!grouped[pid]) grouped[pid] = { tasks: [], totalValue: 0 }
-          grouped[pid].tasks.push(t)
-          grouped[pid].totalValue += v
-        })
-      } else if (t.assigned_to) {
-        const key = t.assigned_to
-        if (!grouped[key]) grouped[key] = { tasks: [], totalValue: 0 }
-        grouped[key].tasks.push(t)
-        grouped[key].totalValue += v
-      } else {
-        if (!grouped['unassigned']) grouped['unassigned'] = { tasks: [], totalValue: 0 }
-        grouped['unassigned'].tasks.push(t)
-        grouped['unassigned'].totalValue += v
-      }
-    })
-
-    // Map to array with profile info
-    const rows = Object.keys(grouped).map(key => {
-      const profile = profiles.find(p => p.id === key)
-      return {
-        assigned_to: key === 'unassigned' ? null : key,
-        profile: profile || null,
-        tasks: grouped[key].tasks,
-        totalValue: grouped[key].totalValue,
-        count: grouped[key].tasks.length
-      }
-    })
-
-    // Sort by totalValue desc
-    rows.sort((a, b) => b.totalValue - a.totalValue)
-    return { rows, overallTotal: rows.reduce((s, r) => s + r.totalValue, 0), totalTasks: completedTasks.length }
+  const handleLogout = () => {
+    try { localStorage.removeItem('access_token') } catch (e) {}
+    navigate('/')
+    setTimeout(() => window.location.reload(), 50)
   }
 
-  const exportMonthlyReportToCSV = () => {
-    const monthNames = ['Ianuarie', 'Februarie', 'Martie', 'Aprilie', 'Mai', 'Iunie', 'Iulie', 'August', 'Septembrie', 'Octombrie', 'Noiembrie', 'Decembrie']
-    const report = computeMonthlyReport(reportMonth)
-    const monthName = monthNames[reportMonth.getMonth()]
-    const year = reportMonth.getFullYear()
+  const computeMonthlyReport = (monthDate) => {
+    return buildMonthlyReportData({ tasks, profiles, users, month: monthDate.getMonth(), year: monthDate.getFullYear() })
+  }
 
-    // CSV Header with all details
-    let csv = 'Angajat,Email,Rol,Nume Task,Descriere Task,Status Task,Ore Estimate,Valoare Task (lei),Data Creare Task,Data Finalizare Task,Deadline Task,Nume Job,Client,Email Client,Telefon Client,Status Job,Prioritate Job,Valoare Job (lei),Bani Incasati (lei),Data Creare Job,Data Finalizare Job\n'
-
-    // Data rows
-    report.rows.forEach(row => {
-      const employeeName = row.profile ? (row.profile.full_name || row.profile.email) : '(Neasignat)'
-      const employeeEmail = row.profile ? row.profile.email : 'N/A'
-      const employeeRole = row.profile ? row.profile.role : 'N/A'
-      
-      row.tasks.forEach((task) => {
-        const job = jobs.find(j => j.id === task.job_id)
-        
-        // Task details
-        const taskName = `"${(task.name || '').replace(/"/g, '""')}"`
-        const taskDesc = `"${(task.description || 'N/A').replace(/"/g, '""')}"`
-        const taskStatus = task.status || 'N/A'
-        const taskHours = task.estimated_hours ? parseFloat(task.estimated_hours).toFixed(2) : '0'
-        const taskValue = (parseFloat(task.value) || 0).toFixed(2)
-        const taskCreated = task.created_at ? new Date(task.created_at).toLocaleString('ro-RO') : 'N/A'
-        const taskCompleted = task.completed_at ? new Date(task.completed_at).toLocaleString('ro-RO') : 'N/A'
-        const taskDeadline = task.deadline ? new Date(task.deadline).toLocaleString('ro-RO') : 'N/A'
-        
-        // Job details
-        const jobName = job ? `"${(job.name || '').replace(/"/g, '""')}"` : 'N/A'
-        const jobClient = job ? `"${(job.client_name || 'N/A').replace(/"/g, '""')}"` : 'N/A'
-        const jobClientEmail = job ? (job.client_email || 'N/A') : 'N/A'
-        const jobClientPhone = job ? (job.client_phone || 'N/A') : 'N/A'
-        const jobStatus = job ? job.status : 'N/A'
-        const jobPriority = job ? (job.priority || 'normal') : 'N/A'
-        const jobValue = job ? (parseFloat(job.total_value) || 0).toFixed(2) : '0'
-        const jobAmountPaid = job ? (parseFloat(job.amount_paid) || 0).toFixed(2) : '0'
-        const jobCreated = job && job.created_at ? new Date(job.created_at).toLocaleString('ro-RO') : 'N/A'
-        const jobCompleted = job && job.completed_at ? new Date(job.completed_at).toLocaleString('ro-RO') : 'N/A'
-        
-        csv += `"${employeeName}","${employeeEmail}","${employeeRole}",${taskName},${taskDesc},"${taskStatus}",${taskHours},${taskValue},"${taskCreated}","${taskCompleted}","${taskDeadline}",${jobName},${jobClient},"${jobClientEmail}","${jobClientPhone}","${jobStatus}","${jobPriority}",${jobValue},${jobAmountPaid},"${jobCreated}","${jobCompleted}"\n`
-      })
-    })
-
-    // Add summary section
-    csv += `\n"REZUMAT"\n`
-    csv += `"Luna:","${monthName} ${year}"\n`
-    csv += `"Total Taskuri Finalizate:","${report.totalTasks}"\n`
-    csv += `"Valoare Totala (lei):","${report.overallTotal.toFixed(2)}"\n`
-    csv += `\n"DETALII PE ANGAJAT"\n`
-    csv += `"Angajat","Email","Numar Taskuri","Valoare Totala (lei)"\n`
-    
-    report.rows.forEach(row => {
-      const employeeName = row.profile ? (row.profile.full_name || row.profile.email) : '(Neasignat)'
-      const employeeEmail = row.profile ? row.profile.email : 'N/A'
-      csv += `"${employeeName}","${employeeEmail}","${row.count}","${row.totalValue.toFixed(2)}"\n`
-    })
-
-    // Create and download file
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
-    const link = document.createElement('a')
-    const url = URL.createObjectURL(blob)
-    link.setAttribute('href', url)
-    link.setAttribute('download', `Raport_Lunar_Detaliat_${monthName}_${year}.csv`)
-    link.style.visibility = 'hidden'
-    document.body.appendChild(link)
-    link.click()
-    document.body.removeChild(link)
+  const exportMonthlyReportToCSV = async () => {
+    try {
+      const m = reportMonth.getMonth()
+      const y = reportMonth.getFullYear()
+      const csv = generateMonthlyReportCsv({ tasks, profiles, users, month: m, year: y })
+      downloadCsv(csv, `monthly_report_${y}_${String(m + 1).padStart(2, '0')}.csv`)
+    } catch (e) {
+      console.error('Export CSV error', e)
+      setError(e.message || 'Eroare export CSV')
+    }
   }
 
   const renderMonthlyReport = () => {
@@ -1054,6 +1049,33 @@ export default function CEODashboard() {
             </div>
           </div>
 
+          {/* Summary table: each employee, tasks completed, total money collected */}
+          <div style={{ marginBottom: 12 }}>
+            <div style={{ fontWeight: 700, marginBottom: 8 }}>Rezumat pe angajat</div>
+            <div style={{ overflowX: 'auto' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', background: 'white' }}>
+                <thead>
+                  <tr>
+                    <th style={{ textAlign: 'left', padding: '8px 12px', borderBottom: '2px solid #eee' }}>Angajat</th>
+                    <th style={{ textAlign: 'left', padding: '8px 12px', borderBottom: '2px solid #eee' }}>Email</th>
+                    <th style={{ textAlign: 'right', padding: '8px 12px', borderBottom: '2px solid #eee' }}>Taskuri completate</th>
+                    <th style={{ textAlign: 'right', padding: '8px 12px', borderBottom: '2px solid #eee' }}>Valoare totală (lei)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {report.rows.map(row => (
+                    <tr key={`sum-${row.assigned_to || 'unassigned'}`}>
+                      <td style={{ padding: '10px 12px', borderBottom: '1px solid #f1f1f1' }}>{row.profile ? (row.profile.full_name || row.profile.email) : '(Neasignat)'}</td>
+                      <td style={{ padding: '10px 12px', borderBottom: '1px solid #f1f1f1' }}>{row.profile ? row.profile.email : 'N/A'}</td>
+                      <td style={{ padding: '10px 12px', borderBottom: '1px solid #f1f1f1', textAlign: 'right' }}>{row.count}</td>
+                      <td style={{ padding: '10px 12px', borderBottom: '1px solid #f1f1f1', textAlign: 'right', fontWeight: '700' }}>{row.totalValue.toFixed(2)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 12 }}>
             {report.rows.length === 0 && (<div style={{ padding: 12, border: '1px solid #eee', borderRadius: 8 }}>Nu s-au găsit taskuri finalizate în luna selectată.</div>)}
             {report.rows.map(row => (
@@ -1061,7 +1083,7 @@ export default function CEODashboard() {
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
                   <div>
                     <div style={{ fontWeight: 'bold' }}>{row.profile ? displayUserLabel(row.profile) : '(Neasignat)'}</div>
-                    <div style={{ fontSize: 12, color: '#666' }}>{row.count} taskuri finalizate</div>
+                    <div style={{ fontSize: 12, color: '#666' }}>{row.count} taskuri completate</div>
                   </div>
                   <div style={{ textAlign: 'right' }}>
                     <div style={{ fontWeight: 'bold' }}>{row.totalValue.toFixed(2)} lei</div>
@@ -1074,6 +1096,8 @@ export default function CEODashboard() {
                     return (
                       <div key={t.id} style={{ marginBottom: 8, fontSize: 13 }}>
                         <div><strong>{t.name}</strong> {job && (<span style={{ color: '#666' }}>— {job.name}</span>)}</div>
+                        <div style={{ fontSize: 12, color: '#666' }}>Asignat: {getTaskAssignedLabels(t).join(', ')}</div>
+                        <div style={{ fontSize: 12, color: '#666' }}>Done by: {getTaskCompleterLabels(t).join(', ')}</div>
                         <div style={{ fontSize: 12, color: '#666' }}>Valoare: { (parseFloat(t.value) || 0).toFixed(2) } lei • Finalizat: {new Date(t.completed_at).toLocaleString('ro-RO')}</div>
                       </div>
                     )
@@ -1176,9 +1200,10 @@ export default function CEODashboard() {
           <h1 style={{ margin: 0 }}>CEO Dashboard</h1>
         </div>
 
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
           <button onClick={() => setShowCalendar(s => !s)} className="btn btn-primary" style={{ padding: '8px 12px', borderRadius: 6 }}>📅 Calendar</button>
           <button onClick={() => setShowMonthlyReport(s => !s)} className="btn btn-primary" style={{ padding: '8px 12px', borderRadius: 6 }}>📊 Raport lunar</button>
+          <button onClick={handleLogout} className="btn btn-outline-danger" style={{ padding: '8px 12px', borderRadius: 6 }}>🚪 Logout</button>
         </div>
 
         {showCalendar && renderCalendar()}
@@ -1359,10 +1384,7 @@ export default function CEODashboard() {
 
                             <div style={{ display: 'flex', flexDirection: 'column', gap: 8, minWidth: 200 }}>
                               <MultiAssignSelector profiles={profiles} selectedIds={t.assigned_to || []} onChange={v => updateNewJobTaskField(i, 'assigned_to', v)} />
-                              <div style={{ display: 'flex', gap: 8 }}>
-                                <button type="button" onClick={() => removeNewJobTask(i)} style={{ fontSize: 12, color: 'red' }}>Șterge</button>
-                                <button type="button" onClick={addNewJobTask} style={{ fontSize: 12 }}>+ Adaugă task</button>
-                              </div>
+                              <button type="button" onClick={() => removeNewJobTask(i)} style={{ fontSize: 12, color: 'red' }}>Șterge Task</button>
                             </div>
                           </div>
                         ))}
@@ -1414,47 +1436,79 @@ export default function CEODashboard() {
                   <button onClick={cancelEditJob} style={{ fontSize: 12 }}>❌ Anulează</button>
                 </div>
               ) : (
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                  <div>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                        <strong style={{ marginRight: 8 }}>{idx + 1}. {job.name}</strong>
-                        <span style={{ padding: '4px 8px', borderRadius: 6, fontSize: 12, color: 'white', textTransform: 'capitalize', backgroundColor: job.priority === 'urgent' ? '#f44336' : job.priority === 'repede' ? '#FF9800' : '#607D8B' }}>{job.priority || 'normal'}</span>
-                                                {job.order_number && <span style={{ padding: '4px 8px', borderRadius: 6, fontSize: 12, color: 'white', backgroundColor: '#2196F3' }}>Nr. {job.order_number}</span>}
-                        <span style={{ color: '#666' }}> - {job.client_name} ({job.status})</span>
+                !isMobile ? (
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                    <div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                          <strong style={{ marginRight: 8 }}>{idx + 1}. {job.name}</strong>
+                          <span style={{ padding: '4px 8px', borderRadius: 6, fontSize: 12, color: 'white', textTransform: 'capitalize', backgroundColor: job.priority === 'urgent' ? '#f44336' : job.priority === 'repede' ? '#FF9800' : '#607D8B' }}>{job.priority || 'normal'}</span>
+                                                  {job.order_number && <span style={{ padding: '4px 8px', borderRadius: 6, fontSize: 12, color: 'white', backgroundColor: '#2196F3' }}>Nr. {job.order_number}</span>}
+                          <span style={{ color: '#666' }}> - {job.client_name} ({job.status})</span>
+                        </div>
+                      
+                        <div style={{ fontSize: 12, color: '#333' }}>💰 Valoare job: {job.total_value != null ? parseFloat(job.total_value).toFixed(2) + ' lei' : 'N/A'}</div>
+                        <div style={{ fontSize: 12, color: '#4CAF50', fontWeight: 'bold' }}>💵 Bani încasați: {job.amount_paid != null ? parseFloat(job.amount_paid).toFixed(2) + ' lei' : '0.00 lei'}</div>
+                      <div style={{ fontSize: 11, color: '#666' }}>⏱️ Timp estimat: <strong>{formatDuration(totalHours)}</strong>{(() => {
+                        const earliestDeadline = jobTasks.filter(t => t.deadline).sort((a, b) => new Date(a.deadline) - new Date(b.deadline))[0];
+                        return earliestDeadline ? ` → Termen limită: ${new Date(earliestDeadline.deadline).toLocaleDateString('ro-RO', { year: 'numeric', month: 'long', day: 'numeric' })}` : '';
+                      })()}</div>
+                    </div>
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                      <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                        <label style={{ fontSize: 11, color: '#333' }}>💵 Încasat:</label>
+                        <input
+                          type="number"
+                          step="0.01"
+                          min="0"
+                          value={amountPaidDraft[job.id] !== undefined ? amountPaidDraft[job.id] : (job.amount_paid != null ? job.amount_paid : '')}
+                          onChange={e => handleAmountPaidChange(job.id, e.target.value)}
+                          style={{ width: 110, padding: 6 }}
+                        />
+                        <button onClick={() => saveAmountPaid(job.id)} style={{ fontSize: 12 }}>💾</button>
                       </div>
-                    
-                      <div style={{ fontSize: 12, color: '#333' }}>💰 Valoare job: {job.total_value != null ? parseFloat(job.total_value).toFixed(2) + ' lei' : 'N/A'}</div>
-                      <div style={{ fontSize: 12, color: '#4CAF50', fontWeight: 'bold' }}>💵 Bani încasați: {job.amount_paid != null ? parseFloat(job.amount_paid).toFixed(2) + ' lei' : '0.00 lei'}</div>
-                    <div style={{ fontSize: 11, color: '#666' }}>⏱️ Timp estimat: <strong>{formatDuration(totalHours)}</strong>{(() => {
-                      const earliestDeadline = jobTasks.filter(t => t.deadline).sort((a, b) => new Date(a.deadline) - new Date(b.deadline))[0];
-                      return earliestDeadline ? ` → Termen limită: ${new Date(earliestDeadline.deadline).toLocaleDateString('ro-RO', { year: 'numeric', month: 'long', day: 'numeric' })}` : '';
-                    })()}</div>
-                  </div>
-                  <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-                    <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                      <label style={{ fontSize: 11, color: '#333' }}>💵 Încasat:</label>
-                      <input
-                        type="number"
-                        step="0.01"
-                        min="0"
-                        value={amountPaidDraft[job.id] !== undefined ? amountPaidDraft[job.id] : (job.amount_paid != null ? job.amount_paid : '')}
-                        onChange={e => handleAmountPaidChange(job.id, e.target.value)}
-                        style={{ width: 110, padding: 6 }}
-                      />
-                      <button onClick={() => saveAmountPaid(job.id)} style={{ fontSize: 12 }}>💾</button>
-                    </div>
-                    <div style={{ display: 'flex', gap: 4 }}>
-                      <button onClick={() => setExpandedJob(isExpanded ? null : job.id)} style={{ fontSize: 12 }}>{isExpanded ? '🔼 Ascunde' : '🔽 Detalii'}</button>
-                      <button onClick={() => startEditJob(job)} style={{ fontSize: 12 }}>✏️ Editează</button>
-                      <button onClick={() => downloadPdfForJob(job)} style={{ fontSize: 12 }}>📄 Descarcă PDF</button>
-                      <button onClick={() => deleteJob(job.id)} style={{ fontSize: 12, color: 'red' }}>🗑️ Șterge</button>
+                      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                        <button onClick={() => setExpandedJob(isExpanded ? null : job.id)} style={{ fontSize: 12 }}>{isExpanded ? '🔼 Ascunde' : '🔽 Detalii'}</button>
+                        <button onClick={() => startEditJob(job)} style={{ fontSize: 12 }}>✏️ Editează</button>
+                        <button onClick={() => downloadPdfForJob(job)} style={{ fontSize: 12 }}>📄 Descarcă PDF</button>
+                        <button onClick={() => deleteJob(job.id)} style={{ fontSize: 12, color: 'red' }}>🗑️ Șterge</button>
+                      </div>
                     </div>
                   </div>
-                </div>
+                ) : (
+                  <button
+                    onClick={() => setExpandedJob(isExpanded ? null : job.id)}
+                    style={{ width: '100%', textAlign: 'left', padding: '12px 14px', borderRadius: 10, border: '1px solid #d0d7de', background: '#f8fafc', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 8 }}
+                  >
+                    <span style={{ minWidth: 0 }}>
+                      <strong style={{ display: 'block' }}>{idx + 1}. {job.name}</strong>
+                      <span style={{ display: 'block', fontSize: 12, color: '#555' }}>{job.client_name} ({job.status})</span>
+                    </span>
+                    <span>{isExpanded ? '▲' : '▼'}</span>
+                  </button>
+                )
               )}
 
               {isExpanded && (
                 <div style={{ marginTop: 8, paddingLeft: 16, borderLeft: '3px solid #4CAF50' }}>
+                  {isMobile && (
+                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
+                      <button onClick={() => startEditJob(job)} style={{ fontSize: 12 }}>✏️ Editează</button>
+                      <button onClick={() => downloadPdfForJob(job)} style={{ fontSize: 12 }}>📄 Descarcă PDF</button>
+                      <button onClick={() => deleteJob(job.id)} style={{ fontSize: 12, color: 'red' }}>🗑️ Șterge</button>
+                      <div style={{ display: 'flex', gap: 6, width: '100%', alignItems: 'center', flexWrap: 'wrap' }}>
+                        <label style={{ fontSize: 11, color: '#333' }}>💵 Încasat:</label>
+                        <input
+                          type="number"
+                          step="0.01"
+                          min="0"
+                          value={amountPaidDraft[job.id] !== undefined ? amountPaidDraft[job.id] : (job.amount_paid != null ? job.amount_paid : '')}
+                          onChange={e => handleAmountPaidChange(job.id, e.target.value)}
+                          style={{ width: 120, padding: 6 }}
+                        />
+                        <button onClick={() => saveAmountPaid(job.id)} style={{ fontSize: 12 }}>💾 Salvează încasat</button>
+                      </div>
+                    </div>
+                  )}
                   <div style={{ fontSize: 12, color: '#555', marginBottom: 8 }}>
                     <div>Client Email: {job.client_email || 'N/A'}</div>
                     <div>Client Telefon: {job.client_phone || 'N/A'}</div>
@@ -1506,21 +1560,71 @@ export default function CEODashboard() {
                                   {(task.value || task.value === 0) && (<div>💰 {task.value} lei</div>)}
                                 </div>
                               </div>
-                              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                                <button onClick={() => setExpandedTask(isTaskExpanded ? null : task.id)} style={{ fontSize: 11 }}>{isTaskExpanded ? '🔼' : '🔽'}</button>
-                                <button onClick={() => toggleComplete(task)} style={{ fontSize: 11 }}>{task.status === 'completed' ? '↩️ Undo' : '✅ Done'}</button>
-                                <button onClick={() => startEditTask(task)} style={{ fontSize: 11 }}>✏️</button>
-                                <button onClick={() => deleteTask(task.id)} style={{ fontSize: 11, color: 'red' }}>🗑️</button>
+                              <div style={{ position: 'relative' }}>
+                                {!isMobile ? (
+                                  <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                                    <button onClick={() => setExpandedTask(isTaskExpanded ? null : task.id)} style={{ fontSize: 11 }}>{isTaskExpanded ? '🔼' : '🔽'}</button>
+                                    <button onClick={() => toggleComplete(task)} style={{ fontSize: 11 }}>{task.status === 'completed' ? '↩️ Undo' : '✅ Done'}</button>
+                                    <button onClick={() => startEditTask(task)} style={{ fontSize: 11 }}>✏️</button>
+                                    <button onClick={() => deleteTask(task.id)} style={{ fontSize: 11, color: 'red' }}>🗑️</button>
+                                    <button onClick={() => setOverflowTask(overflowTask === task.id ? null : task.id)} style={{ fontSize: 11 }}>{overflowTask === task.id ? '▲ Mai puțin' : '⋯ Mai mult'}</button>
+                                  </div>
+                                ) : (
+                                  <div>
+                                    <button onClick={() => setTaskMenuOpen(taskMenuOpen === task.id ? null : task.id)} style={{ fontSize: 16, padding: '6px 8px' }}>⋮</button>
+                                    {taskMenuOpen === task.id && (
+                                      <div style={{ position: 'absolute', right: 0, top: 32, background: 'white', border: '1px solid #ddd', borderRadius: 8, boxShadow: '0 6px 18px rgba(0,0,0,0.12)', zIndex: 60, minWidth: 180, padding: 8 }}>
+                                        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                                          <button onClick={() => { setExpandedTask(isTaskExpanded ? null : task.id); setTaskMenuOpen(null) }} style={{ textAlign: 'left' }}>{isTaskExpanded ? 'Ascunde detalii' : 'Vezi detalii'}</button>
+                                          <button onClick={() => { toggleComplete(task); setTaskMenuOpen(null) }} style={{ textAlign: 'left' }}>{task.status === 'completed' ? '↩️ Undo' : '✅ Done'}</button>
+                                          <button onClick={() => { startEditTask(task); setTaskMenuOpen(null) }} style={{ textAlign: 'left' }}>✏️ Edit</button>
+                                          <button onClick={() => { deleteTask(task.id); setTaskMenuOpen(null) }} style={{ textAlign: 'left', color: 'red' }}>🗑️ Șterge</button>
+                                          <button onClick={() => { setOverflowTask(overflowTask === task.id ? null : task.id); setTaskMenuOpen(null) }} style={{ textAlign: 'left' }}>{overflowTask === task.id ? 'Mai puțin' : 'Mai mult'}</button>
+                                        </div>
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
                               </div>
                             </div>
 
                             {isTaskExpanded && (
                               <div style={{ marginTop: 8, fontSize: 12, color: '#555' }}>
                                 <div>Descriere: {task.description || 'N/A'}</div>
-                                {task.completed_by && <div>Done by: {task.completed_by}</div>}
+                                <div>Asignat: {getTaskAssignedLabels(task).join(', ')}</div>
+                                {(Array.isArray(task.completers) && task.completers.length > 0) ? (
+                                  <div>Done by: {task.completers.map((c, i) => {
+                                    const prof = (profiles || []).find(p => p.id === c.id)
+                                    const label = prof ? displayUserLabel(prof) : (c.email || c.id)
+                                    return `${label}${c.amount != null ? ` (${c.amount} lei)` : ''}${i < task.completers.length - 1 ? ', ' : ''}`
+                                  }).join('')}</div>
+                                ) : task.completed_by ? (
+                                  <div>Done by: {(() => {
+                                    const completer = (profiles || []).find(p => p.id === task.completed_by)
+                                    return completer ? displayUserLabel(completer) : (task.completed_by_email || task.completed_by)
+                                  })()}</div>
+                                ) : null}
                                 {task.completed_at && <div>Completed at: {new Date(task.completed_at).toLocaleString('ro-RO')}</div>}
                                 <div>Created at: {new Date(task.created_at).toLocaleString('ro-RO')}</div>
                                 {task.deadline && <div>Termen limită: {new Date(task.deadline).toLocaleString('ro-RO')}</div>}
+                              </div>
+                            )}
+
+                            {/* Overflow panel for mobile users */}
+                            {overflowTask === task.id && (
+                              <div style={{ marginTop: 8, padding: 8, border: '1px solid var(--border-color)', borderRadius: 8, background: '#fafafa', maxHeight: 220, overflow: 'auto' }}>
+                                <div><strong>Descriere completă:</strong><div style={{ marginTop: 6 }}>{task.description || 'N/A'}</div></div>
+                                <div style={{ marginTop: 8 }}><strong>Asignat:</strong> {getTaskAssignedLabels(task).join(', ')}</div>
+                                {(Array.isArray(task.completers) && task.completers.length > 0) && (
+                                  <div style={{ marginTop: 8 }}><strong>Completat de:</strong> {task.completers.map((c, i) => {
+                                    const prof = (profiles || []).find(p => p.id === c.id)
+                                    const label = prof ? displayUserLabel(prof) : (c.email || c.id)
+                                    return `${label}${c.amount != null ? ` (${c.amount} lei)` : ''}${i < task.completers.length - 1 ? ', ' : ''}`
+                                  }).join('')}</div>
+                                )}
+                                {task.completed_at && <div style={{ marginTop: 8 }}><strong>Completed at:</strong> {new Date(task.completed_at).toLocaleString('ro-RO')}</div>}
+                                <div style={{ marginTop: 8 }}><strong>Created at:</strong> {new Date(task.created_at).toLocaleString('ro-RO')}</div>
+                                {task.deadline && <div style={{ marginTop: 8 }}><strong>Termen limită:</strong> {new Date(task.deadline).toLocaleString('ro-RO')}</div>}
                               </div>
                             )}
                           </div>
