@@ -1,27 +1,20 @@
 const nodemailer = require('nodemailer')
-const { createClient } = require('@supabase/supabase-js')
+const { withClient } = require('./_db')
 
 // Serverless endpoint for checking deadlines and notifying admins/CEOs
 // Protect this endpoint with a secret header: `x-check-secret: <CHECK_DEADLINES_SECRET>`
 
 module.exports = async (req, res) => {
   try {
-    const SUPABASE_URL = process.env.SUPABASE_URL
-    const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY
     const CHECK_SECRET = process.env.CHECK_DEADLINES_SECRET
 
-    if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
-      console.error('Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY in environment')
-      return res.status(500).json({ ok: false, error: 'Server misconfigured' })
+    // Verify secret header (if configured)
+    if (CHECK_SECRET) {
+      const provided = req.headers['x-check-secret'] || req.headers['x-check-secret']
+      if (!provided || provided !== CHECK_SECRET) {
+        return res.status(401).json({ ok: false, error: 'Unauthorized' })
+      }
     }
-
-    // Verify secret header
-    const provided = req.headers['x-check-secret'] || req.headers['x-check-secret']
-    if (!CHECK_SECRET || !provided || provided !== CHECK_SECRET) {
-      return res.status(401).json({ ok: false, error: 'Unauthorized' })
-    }
-
-    const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
     // Build mail transport (use Ethereal if SMTP not configured)
     async function buildTransport() {
@@ -41,29 +34,33 @@ module.exports = async (req, res) => {
       return { transporter, preview: false }
     }
 
+    // Query local Postgres for overdue tasks and notify admins
     const now = new Date().toISOString()
-    const { data: tasks, error: tasksErr } = await supabase
-      .from('tasks')
-      .select('id,name,job_id,description,assigned_to,assigned_to_emails,deadline')
-      .lt('deadline', now)
-      .neq('status', 'completed')
-      .or('deadline_alert_sent.eq.false,deadline_alert_sent.is.null')
-
-    if (tasksErr) {
-      console.error('Supabase tasks query error', tasksErr)
-      return res.status(500).json({ ok: false, error: 'DB error' })
-    }
+    const tasks = await withClient(async (client) => {
+      const q = `SELECT id, name, job_id, description, assigned_to, assigned_to_emails, deadline FROM tasks WHERE deadline < $1 AND (status IS NULL OR status <> 'completed') AND (deadline_alert_sent IS FALSE OR deadline_alert_sent IS NULL)`
+      const r = await client.query(q, [now])
+      return r.rows
+    })
 
     if (!tasks || tasks.length === 0) {
       return res.status(200).json({ ok: true, message: 'No overdue tasks' })
     }
 
     const jobIds = Array.from(new Set(tasks.map(t => t.job_id).filter(Boolean)))
-    const { data: jobs } = await supabase.from('jobs').select('id,name,client_email,client_name').in('id', jobIds)
+    const jobs = await withClient(async (client) => {
+      if (jobIds.length === 0) return []
+      const q = `SELECT id, name, client_email, client_name FROM jobs WHERE id = ANY($1)`
+      const r = await client.query(q, [jobIds])
+      return r.rows
+    })
     const jobsById = (jobs || []).reduce((acc, j) => { acc[j.id] = j; return acc }, {})
 
-    // Fetch admin + CEO emails
-    const { data: profiles } = await supabase.from('profiles').select('email,full_name,role').in('role', ['admin', 'ceo'])
+    // Fetch admin + CEO emails from local profiles
+    const profiles = await withClient(async (client) => {
+      const q = `SELECT email, full_name, role FROM profiles WHERE role = ANY($1)`
+      const r = await client.query(q, [['admin','ceo']])
+      return r.rows
+    })
     const adminRecipients = (profiles || []).map(p => p.email).filter(Boolean)
 
     if (adminRecipients.length === 0) {
@@ -105,8 +102,10 @@ module.exports = async (req, res) => {
 
     // Mark tasks as alerted
     const taskIds = tasks.map(t => t.id)
-    const { error: updErr } = await supabase.from('tasks').update({ deadline_alert_sent: true }).in('id', taskIds)
-    if (updErr) console.error('Failed to mark tasks as alerted', updErr)
+    await withClient(async (client) => {
+      const q = `UPDATE tasks SET deadline_alert_sent = true WHERE id = ANY($1)`
+      await client.query(q, [taskIds])
+    })
 
     return res.status(200).json({ ok: true, sentTo: adminRecipients, alertedTasks: taskIds.length })
   } catch (err) {

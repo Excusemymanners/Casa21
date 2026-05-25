@@ -167,6 +167,7 @@ const Signup = () => {
 
         <div className="auth-card auth-card-with-sides">
           <div className="auth-brand">
+            <img src="/Sigla.svg" alt="Sigla" className="auth-brand-icon" />
             <h2>Create Account</h2>
             <p>Join Overview and start managing your projects!</p>
           </div>

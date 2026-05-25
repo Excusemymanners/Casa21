@@ -130,6 +130,7 @@ const Login = () => {
 
         <div className="auth-card auth-card-with-sides">
           <div className="auth-brand">
+            <img src="/Sigla.svg" alt="Sigla" className="auth-brand-icon" />
             <h2>Welcome Back</h2>
             <p>Log in to continue managing your projects</p>
           </div>

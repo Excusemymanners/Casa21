@@ -1197,6 +1197,7 @@ export default function CEODashboard() {
     <div className="dashboard-container">
       <div className="dashboard-header" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <img src="/Sigla.svg" alt="Sigla" style={{ width: 56, height: 56, objectFit: 'contain' }} />
           <h1 style={{ margin: 0 }}>CEO Dashboard</h1>
         </div>
 

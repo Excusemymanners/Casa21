@@ -20,6 +20,13 @@
   font-weight: 700;
 }
 
+.app-logo {
+  width: 56px;
+  height: 56px;
+  object-fit: contain;
+  display: inline-block;
+}
+
 .app-header button {
   padding: 8px 14px;
 }

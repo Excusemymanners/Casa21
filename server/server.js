@@ -48,6 +48,21 @@ function startServer() {
     console.log(`Local API server listening on http://localhost:${PORT}`)
   })
 
+  // In development, ensure a default admin user exists by running the seed script.
+  try {
+    if ((process.env.NODE_ENV || 'development') !== 'production') {
+      const { spawn } = require('child_process')
+      const seed = spawn(process.execPath, [require('path').join(__dirname, '..', 'scripts', 'seed-user-to-users.js')], { stdio: 'inherit', env: process.env })
+      seed.on('close', (code) => {
+        if (code === 0) console.log('Default admin seed completed')
+        else console.warn('Default admin seed exited with code', code)
+      })
+      seed.on('error', (err) => console.warn('Failed to run default admin seed:', err && err.message))
+    }
+  } catch (e) {
+    console.warn('Error while attempting to seed default admin:', e && e.message)
+  }
+
   server.on('error', (err) => {
     console.error('Local API server failed to start:', err && err.message)
   })

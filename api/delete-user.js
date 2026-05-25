@@ -1,4 +1,4 @@
-const { createClient } = require('@supabase/supabase-js');
+const { withClient } = require('./_db');
 
 module.exports = async function handler(req, res) {
   if (req.method !== 'POST') {
@@ -12,51 +12,26 @@ module.exports = async function handler(req, res) {
   }
 
   try {
-    // Use service role key to access admin API
-    const supabaseUrl = process.env.REACT_APP_SUPABASE_URL;
-    const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    // Delete user records from local database (profiles + users tables)
+    let userEmail = null;
+    await withClient(async (client) => {
+      const r = await client.query('SELECT email FROM profiles WHERE id = $1', [userId]);
+      if (r.rows && r.rows[0]) userEmail = r.rows[0].email;
+      await client.query('DELETE FROM profiles WHERE id = $1', [userId]);
+      await client.query('DELETE FROM users WHERE id = $1', [userId]);
+    });
 
-    if (!supabaseUrl || !supabaseServiceKey) {
-      console.error('Missing Supabase environment variables');
-      return res.status(500).json({ error: 'Server configuration error' });
-    }
-
-    const supabaseAdmin = createClient(supabaseUrl, supabaseServiceKey);
-
-    // Get the user's email first (for logging)
-    const { data: userData, error: fetchErr } = await supabaseAdmin
-      .from('profiles')
-      .select('email')
-      .eq('id', userId)
-      .single();
-
-    if (fetchErr) {
-      console.error('Error fetching user:', fetchErr);
-      return res.status(400).json({ error: 'User not found in profiles' });
-    }
-
-    // Delete from auth.users using admin API
-    const { data, error } = await supabaseAdmin.auth.admin.deleteUser(userId);
-
-    if (error) {
-      console.error('Error deleting from auth.users:', error);
-      return res.status(400).json({ 
-        error: 'Failed to delete from auth.users',
-        details: error.message 
-      });
-    }
-
-    return res.status(200).json({ 
+    return res.status(200).json({
       success: true,
-      message: `User ${userData?.email} deleted from auth.users`,
+      message: `User ${userEmail || userId} removed from local database`,
       userId
     });
 
   } catch (error) {
-    console.error('Unexpected error:', error);
-    return res.status(500).json({ 
+    console.error('Unexpected error deleting user:', error);
+    return res.status(500).json({
       error: 'Unexpected server error',
-      details: error.message 
+      details: error.message
     });
   }
 };

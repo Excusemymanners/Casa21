@@ -380,8 +380,7 @@ const EmployeeDashboard = () => {
       
       days.push(
         <div
-          key={day}
-          onClick={() => setSelectedDate(date)}
+          key={`day-${day}`}
           style={{
             padding: 16,
             textAlign: 'center',
@@ -398,6 +397,7 @@ const EmployeeDashboard = () => {
             alignItems: 'center',
             justifyContent: 'center'
           }}
+          onClick={() => setSelectedDate(date)}
         >
           {day}
           {hasEvents && !isSelected && (

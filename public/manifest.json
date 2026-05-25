@@ -6,6 +6,7 @@
   "background_color": "#ffffff",
   "theme_color": "#000000",
   "icons": [
+    { "src": "/Sigla.svg", "sizes": "256x256", "type": "image/svg+xml" },
     { "src": "/favicon.ico", "sizes": "64x64", "type": "image/x-icon" }
   ]
 }

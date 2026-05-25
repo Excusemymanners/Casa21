@@ -17,6 +17,7 @@ const AppHeader = ({ user }) => {
     <header className="app-header card">
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <img src="/Sigla.svg" alt="Sigla" className="app-logo" />
           <div className="avatar">{(user && (user.full_name || user.email) || 'U').charAt(0)}</div>
           <div>
             <div style={{ fontWeight: 700, color: '#111827' }}>{user?.full_name || user?.email || 'Utilizator'}</div>

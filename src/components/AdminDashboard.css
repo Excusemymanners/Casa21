@@ -30,6 +30,12 @@
   font-weight: 800;
 }
 
+.dashboard-header img {
+  display: inline-block;
+  vertical-align: middle;
+  border-radius: 8px;
+}
+
 /* Button Styles */
 .btn {
   padding: 12px 24px;

@@ -175,6 +175,14 @@
   animation: bounce 2s infinite;
 }
 
+.auth-brand img.auth-brand-icon {
+  width: 96px;
+  height: 96px;
+  object-fit: contain;
+  margin-bottom: 12px;
+  animation: none;
+}
+
 @keyframes bounce {
   0%, 100% {
     transform: translateY(0);
