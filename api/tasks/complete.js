@@ -46,7 +46,23 @@ module.exports = async (req, res) => {
       const params = [JSON.stringify(existing), 'completed', completedAt, first ? first.id : null, first ? first.email : null, id]
       console.log('[tasks/complete] SQL:', sql, 'PARAMS:', params)
       const { rows } = await client.query(sql, params)
-      return res.json({ data: rows[0] })
+      const completedTask = rows[0]
+      // Auto-complete job when all its tasks are completed
+      if (completedTask && completedTask.job_id) {
+        try {
+          const { rows: rem } = await client.query(
+            `SELECT COUNT(*) AS c FROM public.tasks WHERE job_id = $1 AND status <> 'completed'`,
+            [completedTask.job_id]
+          )
+          if (parseInt(rem[0].c, 10) === 0) {
+            await client.query(
+              `UPDATE public.jobs SET status = 'completed', completed_at = NOW() WHERE id = $1 AND (status IS NULL OR status <> 'completed')`,
+              [completedTask.job_id]
+            )
+          }
+        } catch (autoErr) { console.warn('[tasks/complete] auto-complete job failed:', autoErr.message) }
+      }
+      return res.json({ data: completedTask })
     })
   } catch (err) {
     console.error('tasks/complete error', err)

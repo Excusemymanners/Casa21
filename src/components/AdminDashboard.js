@@ -1,8 +1,30 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import * as XLSX from 'xlsx'
 import supabase from '../supabase-client'
 import { sendJobCompletionEmail, sendTaskCompletionEmail, areAllTasksCompleted } from '../emailService'
+import { buildMonthlyReportData, generateMonthlyReportCsv, downloadCsv } from '../utils/generateMonthlyReportCsv'
 import './AdminDashboard.css'
+import './DashboardSidebar.css'
+
+const CATEGORY_LABELS = {
+  cadastru_sporadic:   'Cadastru Sporadic',
+  cadastru_sistematic: 'Cadastru Sistematic',
+  topografie:          'Topografie',
+  administrativ:       'Administrativ',
+}
+
+const JOB_NAME_OPTIONS = [
+  'Actualizare Date',
+  'Prima Înregistrare',
+  'Aviz OCPI',
+  'Dezmembrare/Alipire',
+  'Îndreptare Eroare Materiale',
+  'Identificare Top/CF',
+  'Cadastru Sistematic',
+  'Cerere BCPI',
+  'Altele',
+]
 
 const AdminDashboard = () => {
   const navigate = useNavigate()
@@ -15,59 +37,60 @@ const AdminDashboard = () => {
   const [error, setError] = useState(null)
   const [message, setMessage] = useState(null)
 
-  // Stare pentru creare job + taskuri
+  const [activeSection, setActiveSection] = useState('home')
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false)
+
   const [showCreateWithTasks, setShowCreateWithTasks] = useState(false)
-  const [jobname, setJobname] = useState('')
+  const [jobNameType, setJobNameType] = useState('')
+  const [jobNameCustom, setJobNameCustom] = useState('')
   const [clientname, setClientname] = useState('')
   const [clientemail, setClientemail] = useState('')
   const [clientPhone, setClientPhone] = useState('')
   const [jobPriority, setJobPriority] = useState('normal')
-  const [jobValue, setJobValue] = useState('')
   const [jobOrderNumber, setJobOrderNumber] = useState('')
   const [clientIdSeries, setClientIdSeries] = useState('')
   const [clientCNP, setClientCNP] = useState('')
   const [clientAddress, setClientAddress] = useState('')
-  const [newJobTasks, setNewJobTasks] = useState([{ name: '', description: '', assigned_to: [], estimated_hours: '', deadline: '' }])
+  const [jobCategory, setJobCategory] = useState('')
+  const [newJobTasks, setNewJobTasks] = useState([{ name: '', description: '', assigned_to: [], estimated_hours: '', value: '', deadline: '', noDeadline: false }])
 
-  // Stare pentru job expandat
+  const [selectedJobId, setSelectedJobId] = useState(null)
+  const [previousSection, setPreviousSection] = useState('lucrari')
   const [expandedJob, setExpandedJob] = useState(null)
   const [editingJobId, setEditingJobId] = useState(null)
   const [jobEdits, setJobEdits] = useState({})
-  const [amountPaidDraft, setAmountPaidDraft] = useState({})
-
-  // Stare pentru task expandat și editare
   const [expandedTask, setExpandedTask] = useState(null)
   const [editingTaskId, setEditingTaskId] = useState(null)
   const [taskEdits, setTaskEdits] = useState({})
-  // Stare pentru overflow (detalii lungi) per task
   const [overflowTask, setOverflowTask] = useState(null)
-  // Meniu de actiuni per task (mobil) si detectare device mobil
   const [taskMenuOpen, setTaskMenuOpen] = useState(null)
   const [isMobile, setIsMobile] = useState(typeof window !== 'undefined' ? window.innerWidth < 700 : false)
+  const [addingTaskToJob, setAddingTaskToJob] = useState(null)
+  const [newTaskData, setNewTaskData] = useState({ name: '', description: '', assigned_to: [], estimated_hours: '', value: '', deadline: '', noDeadline: false })
+  const [amountPaidDraft, setAmountPaidDraft] = useState({})
+  const [taskDrafts, setTaskDrafts] = useState({})
+  const [searchQuery, setSearchQuery] = useState('')
+  const [expandedEmployees, setExpandedEmployees] = useState(new Set())
+  const [notifyingEmployees, setNotifyingEmployees] = useState({})
+  const [dragOverTaskId, setDragOverTaskId] = useState(null)
+  const [dragOverJobId, setDragOverJobId] = useState(null)
+  const dragTaskRef = useRef(null)
+  const dragJobRef = useRef(null)
+
+  const [editingProfileId, setEditingProfileId] = useState(null)
+  const [profileEdits, setProfileEdits] = useState({})
+  const [showCreateProfile, setShowCreateProfile] = useState(false)
+  const [newProfileData, setNewProfileData] = useState({ email: '', password: '', confirmPassword: '', full_name: '', role: 'employee' })
+
+  const [currentMonth, setCurrentMonth] = useState(new Date())
+  const [selectedDate, setSelectedDate] = useState(null)
+  const [reportMonth, setReportMonth] = useState(new Date())
 
   useEffect(() => {
     const onResize = () => setIsMobile(window.innerWidth < 700)
     window.addEventListener('resize', onResize)
     return () => window.removeEventListener('resize', onResize)
   }, [])
-
-  // Stare pentru adăugare task la job existent
-  const [addingTaskToJob, setAddingTaskToJob] = useState(null)
-  const [newTaskData, setNewTaskData] = useState({ name: '', description: '', assigned_to: [], estimated_hours: '', deadline: '' })
-
-  // Stare gestionare angajați
-  const [showEmployeeManagement, setShowEmployeeManagement] = useState(false)
-  const [editingProfileId, setEditingProfileId] = useState(null)
-  const [profileEdits, setProfileEdits] = useState({})
-
-  // Stare creare profil nou
-  const [showCreateProfile, setShowCreateProfile] = useState(false)
-  const [newProfileData, setNewProfileData] = useState({ email: '', password: '', confirmPassword: '', full_name: '', role: 'employee' })
-
-  // Stare calendar
-  const [showCalendar, setShowCalendar] = useState(false)
-  const [currentMonth, setCurrentMonth] = useState(new Date())
-  const [selectedDate, setSelectedDate] = useState(null)
 
   useEffect(() => {
     const getUser = async () => {
@@ -76,14 +99,9 @@ const AdminDashboard = () => {
     }
     getUser()
     fetchData()
+    const interval = setInterval(fetchData, 2 * 60 * 1000)
+    return () => clearInterval(interval)
   }, [])
-
-  const handleLogout = () => {
-    try { localStorage.removeItem('access_token') } catch (e) {}
-    navigate('/')
-    setTimeout(() => window.location.reload(), 50)
-  }
-
 
   const fetchData = async () => {
     setLoading(true)
@@ -93,35 +111,32 @@ const AdminDashboard = () => {
         supabase.from('jobs').select('*').order('created_at', { ascending: false }),
         supabase.from('tasks').select('*').order('created_at', { ascending: true }),
         supabase.from('profiles').select('id, email, full_name, role, created_at'),
-        fetch('/api/users').then(async (response) => {
-          if (!response.ok) return { data: [], error: new Error('Failed to load users') }
-          const body = await response.json()
-          return { data: body.users || [], error: null }
+        fetch('/api/users').then(async r => {
+          if (!r.ok) return { data: [], error: new Error('Failed') }
+          const b = await r.json()
+          return { data: b.users || [], error: null }
         })
       ])
       if (jobsRes.error) throw jobsRes.error
       if (tasksRes.error) throw tasksRes.error
       if (profilesRes.error) throw profilesRes.error
-      if (usersRes.error) throw usersRes.error
 
       const profilesData = profilesRes.data || []
-      const usersData = usersRes.data || []
-
-      // Normalize assigned_to to always be an array (DB might have scalar or array)
       const tasksNormalized = (tasksRes.data || []).map(t => {
         let assigned = []
         if (Array.isArray(t.assigned_to)) assigned = t.assigned_to
         else if (t.assigned_to) assigned = [t.assigned_to]
-        const assignedEmails = Array.isArray(t.assigned_to_emails) ? t.assigned_to_emails : (t.assigned_to_email ? [t.assigned_to_email] : assigned.map(pid => (profilesData.find(p => p.id === pid) || {}).email).filter(Boolean))
+        const assignedEmails = Array.isArray(t.assigned_to_emails)
+          ? t.assigned_to_emails
+          : assigned.map(pid => (profilesData.find(p => p.id === pid) || {}).email).filter(Boolean)
         return { ...t, assigned_to: assigned, assigned_to_emails: assignedEmails }
       })
 
       setJobs(jobsRes.data || [])
       setTasks(tasksNormalized)
       setProfiles(profilesData)
-      setUsers(usersData)
+      setUsers(usersRes.data || [])
     } catch (err) {
-      console.error(err)
       setError(err.message || 'Eroare la încărcare date')
     } finally {
       setLoading(false)
@@ -134,1711 +149,1386 @@ const AdminDashboard = () => {
       const { data, error: err } = await supabase.from('profiles').select('id, email, full_name, role, created_at')
       if (err) throw err
       setProfiles(data || [])
-      setMessage('✅ Profile reîmprospătate!')
-      setTimeout(() => setMessage(null), 2000)
+      setMessage('Profile reîmprospătate!'); setTimeout(() => setMessage(null), 2000)
     } catch (err) {
-      console.error(err)
       setError(err.message || 'Eroare la încărcare profile')
-    } finally {
-      setLoading(false)
-    }
+    } finally { setLoading(false) }
   }
 
-  // Helper pentru formatare utilizator
+  const recalcJobTotal = async (jobId) => {
+    try {
+      const { data: jobTasks } = await supabase.from('tasks').select('value').eq('job_id', jobId)
+      const total = (jobTasks || []).reduce((s, t) => s + (parseFloat(t.value) || 0), 0)
+      await supabase.from('jobs').update({ total_value: total }).eq('id', jobId)
+      setJobs(prev => prev.map(j => j.id === jobId ? { ...j, total_value: total } : j))
+    } catch (err) { console.error('recalcJobTotal', err) }
+  }
+
   const displayUserLabel = (profile) => {
     if (!profile) return '(Neasignat)'
     return profile.full_name ? `${profile.full_name} (${profile.email})` : profile.email
   }
 
-  // Multi-assign selector (checkbox list) to allow easy multi-selection
+  const resolveUserLabel = (idOrEmail) => {
+    if (!idOrEmail) return null
+    const byProfile = (profiles || []).find(p => p.id === idOrEmail || p.email === idOrEmail)
+    if (byProfile) return displayUserLabel(byProfile)
+    const byUser = (users || []).find(u => u.id === idOrEmail || u.email === idOrEmail)
+    if (byUser) return byUser.full_name ? `${byUser.full_name} (${byUser.email})` : byUser.email
+    return String(idOrEmail)
+  }
+
+  const formatEstimatedDate = (hours) => {
+    if (!hours || hours <= 0) return ''
+    let wh = hours; let d = new Date()
+    while (wh > 0) { const dow = d.getDay(); if (dow !== 0 && dow !== 6) wh -= 8; if (wh > 0) d.setDate(d.getDate() + 1) }
+    return d.toLocaleDateString('ro-RO', { year: 'numeric', month: 'long', day: 'numeric' })
+  }
+
   const MultiAssignSelector = ({ profiles, selectedIds = [], onChange }) => {
-    const toggle = (id) => {
-      const curr = Array.isArray(selectedIds) ? [...selectedIds] : []
-      const idx = curr.indexOf(id)
-      if (idx === -1) curr.push(id)
-      else curr.splice(idx, 1)
-      onChange(curr)
-    }
+    const ids = Array.isArray(selectedIds) ? selectedIds : []
+    const selectedProfiles = (profiles || []).filter(p => ids.includes(p.id))
+    const availableProfiles = (profiles || []).filter(p => !ids.includes(p.id))
+    const add = (id) => { if (!id) return; onChange([...ids, id]) }
+    const remove = (id) => onChange(ids.filter(sid => sid !== id))
     return (
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 220, overflow: 'auto' }}>
-        {(profiles || []).map(p => (
-          <label key={p?.id} style={{ fontSize: 13 }}>
-            <input type="checkbox" checked={Array.isArray(selectedIds) && selectedIds.includes(p.id)} onChange={() => toggle(p.id)} />{' '}
-            {displayUserLabel(p)}
-          </label>
-        ))}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+        <select onChange={e => { add(e.target.value); e.target.value = '' }} defaultValue="" style={{ padding: '6px 9px', borderRadius: 5, border: '1px solid #ccc', fontSize: 13, background: 'white' }}>
+          <option value="">-- Alege colaborator</option>
+          {availableProfiles.map(p => <option key={p.id} value={p.id}>{displayUserLabel(p)}</option>)}
+        </select>
+        {selectedProfiles.length > 0 && (
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+            {selectedProfiles.map(p => (
+              <span key={p.id} style={{ background: '#e3f2fd', color: '#1565c0', padding: '3px 8px', borderRadius: 12, fontSize: 12, display: 'flex', alignItems: 'center', gap: 4, fontWeight: 500 }}>
+                {p.full_name || p.email}
+                <button type="button" onClick={() => remove(p.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#1565c0', fontSize: 15, padding: '0 1px', lineHeight: 1 }}>×</button>
+              </span>
+            ))}
+          </div>
+        )}
       </div>
     )
   }
 
-  // Helper pentru durata estimată
-  const formatDuration = (hours) => {
-    if (!hours || hours <= 0) return '0h'
-    const days = Math.floor(hours / 8)
-    const remainingHours = hours % 8
-    const minutes = Math.round((remainingHours % 1) * 60)
-    const wholeHours = Math.floor(remainingHours)
-    
-    let result = ''
-    if (days > 0) result += `${days}z `
-    if (wholeHours > 0) result += `${wholeHours}h `
-    if (minutes > 0) result += `${minutes}m`
-    return result.trim() || '0h'
-  }
-
-  const calculateEstimatedDate = (hours) => {
-    if (!hours || hours <= 0) return null
-    const now = new Date()
-    let workingHours = hours
-    let currentDate = new Date(now)
-    
-    while (workingHours > 0) {
-      const dayOfWeek = currentDate.getDay()
-      if (dayOfWeek !== 0 && dayOfWeek !== 6) {
-        workingHours -= 8
+  const downloadPdfForJob = async (job) => {
+    try {
+      const jobTasks = tasks.filter(t => t.job_id === job.id).sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
+      const totalValue = job.total_value != null ? parseFloat(job.total_value) : jobTasks.reduce((s, t) => s + (parseFloat(t.value) || 0), 0)
+      const norm = v => { if (v == null) return null; if (typeof v === 'object') return v.order_number ?? v.value ?? v.id ?? String(v); return v }
+      const pdfData = {
+        template: 'blank', clientName: job.client_name, clientCNP: job.client_cnp || null,
+        clientSeries: job.client_id_series || null, clientAddress: job.client_address || null, clientEmail: job.client_email || null,
+        jobName: job.name, tasks: jobTasks, totalValue, completedAt: job.completed_at || new Date().toISOString(),
+        receptionNumber: job.reception_number || null, orderNumber: norm(job.order_number), users, asciiFallback: true
       }
-      if (workingHours > 0) {
-        currentDate.setDate(currentDate.getDate() + 1)
-      }
-    }
-    return currentDate
+      const { generateAndDownloadPdf } = await import('../utils/generatePdfClient')
+      const res = await generateAndDownloadPdf(pdfData)
+      if (!res || !res.ok) setError(res?.error || 'Eroare generare PDF')
+    } catch (err) { setError(err.message || 'Eroare la descărcare PDF') }
   }
 
-  const formatEstimatedDate = (hours) => {
-    const date = calculateEstimatedDate(hours)
-    if (!date) return ''
-    return date.toLocaleDateString('ro-RO', { year: 'numeric', month: 'long', day: 'numeric' })
-  }
-
-  // Creare job cu taskuri
   const handleCreateJob = async (e) => {
     e.preventDefault()
-    setLoading(true)
-    setError(null)
+    const invalidTask = newJobTasks.filter(t => t.name?.trim()).find(t => !t.noDeadline && !t.deadline)
+    if (invalidTask) { setError(`Task "${invalidTask.name}": setează un deadline sau bifează "Fără termen".`); return }
+    const finalJobName = jobNameType === 'Altele' ? jobNameCustom.trim() : jobNameType
+    if (!finalJobName) { setError('Selectează tipul lucrării.'); return }
+    setLoading(true); setError(null)
     try {
-        const fullClientName = clientname || ''
-
-      const { data: newJob, error: jobErr } = await supabase.from('jobs').insert([{
-        name: jobname,
-        priority: jobPriority || 'normal',
-        client_name: fullClientName,
-        client_phone: clientPhone || null,
-        client_id_series: clientIdSeries || null,
-        client_cnp: clientCNP || null,
-        client_address: clientAddress || null,
-        client_email: clientemail || null,
-        status: 'todo',
-        created_by: user.id,
-        total_value: jobValue ? parseFloat(jobValue) : 0,
-        order_number: jobOrderNumber ? parseInt(jobOrderNumber, 10) : null
-      }]).select()
-      if (jobErr) throw jobErr
-
-      const jobId = newJob[0].id
-      const filteredTasks = newJobTasks.filter(t => t.name && t.name.trim())
-      // Preserve client-side creation order for tasks inserted in bulk by
-      // setting explicit incremental `created_at` timestamps (1ms increments).
-      const baseCreatedAt = Date.now()
+      const catValue = jobCategory || null
+      const jobPayload = {
+        name: finalJobName, priority: jobPriority || 'normal', client_name: clientname || '',
+        client_phone: clientPhone || null, client_id_series: clientIdSeries || null,
+        client_cnp: clientCNP || null, client_address: clientAddress || null,
+        client_email: clientemail || null, status: 'todo', created_by: user?.id || null,
+        total_value: 0, order_number: jobOrderNumber ? parseInt(jobOrderNumber, 10) : null,
+        category: catValue
+      }
+      let newJobData
+      try {
+        const { data: d, error: e } = await supabase.from('jobs').insert([jobPayload]).select()
+        if (e) throw e; newJobData = d
+      } catch (err) {
+        if (err?.message?.includes('category')) {
+          const { category: _, ...payloadNoCat } = jobPayload
+          const { data: d2, error: e2 } = await supabase.from('jobs').insert([payloadNoCat]).select()
+          if (e2) throw e2; newJobData = d2
+        } else throw err
+      }
+      const jobId = newJobData[0].id
+      const filteredTasks = newJobTasks.filter(t => t.name?.trim())
+      const base = Date.now()
       const tasksToInsert = filteredTasks.map((t, i) => ({
-        job_id: jobId,
-        name: t.name,
-        description: t.description || null,
-        status: 'todo',
-        // write assigned_to as array (Admin selects multiple)
+        job_id: jobId, name: t.name, description: t.description || null, status: 'todo',
         assigned_to: Array.isArray(t.assigned_to) ? t.assigned_to : (t.assigned_to ? [t.assigned_to] : []),
-        // keep assigned_to_emails null for DB (can be populated by a trigger or later job)
         assigned_to_emails: null,
-        estimated_hours: t.estimated_hours ? parseFloat(t.estimated_hours) : null,
-        value: null,
-        deadline: t.deadline ? (new Date(t.deadline)).toISOString() : null,
-        created_by: user.id,
-        created_at: new Date(baseCreatedAt + i).toISOString()
+        value: t.value ? parseFloat(t.value) : null,
+        deadline: t.noDeadline ? null : (t.deadline ? new Date(t.deadline).toISOString() : null),
+        created_by: user?.id || null, created_at: new Date(base + i).toISOString()
       }))
-
-      // Safe insert: try inserting as-is (with arrays). If the DB still
-      // has a scalar `assigned_to` column, Postgres may return a 22P02
-      // invalid-input error (array sent to uuid). In that case, retry
-      // by sending only the first assignee (backwards-compatible).
-      const attemptInsertTasks = async (rows) => {
+      const tryInsertTasks = async (rows) => {
         try {
-          const { data: insertedTasks, error: tasksErr } = await supabase.from('tasks').insert(rows).select()
-          if (tasksErr) throw tasksErr
-          return insertedTasks
+          const { data: d, error: e } = await supabase.from('tasks').insert(rows).select()
+          if (e) throw e; return d
         } catch (err) {
-          // detect Postgres UUID array mismatch error
-          if (err?.message && err.message.includes('invalid input syntax for type uuid')) {
-            const transformed = rows.map(r => ({ ...r, assigned_to: Array.isArray(r.assigned_to) && r.assigned_to.length > 0 ? r.assigned_to[0] : r.assigned_to }))
-            const { data: retried, error: retryErr } = await supabase.from('tasks').insert(transformed).select()
-            if (retryErr) throw retryErr
-            return retried
+          if (err?.message?.includes('invalid input syntax for type uuid')) {
+            const t2 = rows.map(r => ({ ...r, assigned_to: Array.isArray(r.assigned_to) && r.assigned_to.length > 0 ? r.assigned_to[0] : r.assigned_to }))
+            const { data: d2, error: e2 } = await supabase.from('tasks').insert(t2).select()
+            if (e2) throw e2; return d2
           }
           throw err
         }
       }
+      if (tasksToInsert.length > 0) await tryInsertTasks(tasksToInsert)
+      const sumTasks = tasksToInsert.reduce((s, t) => s + (parseFloat(t.value) || 0), 0)
+      if (sumTasks > 0) await supabase.from('jobs').update({ total_value: sumTasks }).eq('id', jobId)
 
-      if (tasksToInsert.length > 0) {
-        await attemptInsertTasks(tasksToInsert)
-      }
-
-      setJobname('')
-      setClientname('')
-      setJobPriority('normal')
-      setClientIdSeries('')
-      setClientCNP('')
-      setClientAddress('')
-      setClientemail('')
-      setClientPhone('')
-      setNewJobTasks([{ name: '', description: '', assigned_to: [], estimated_hours: '' }])
-      setJobOrderNumber('')
+      setJobNameType(''); setJobNameCustom(''); setClientname(''); setJobPriority('normal'); setClientIdSeries(''); setClientCNP(''); setClientAddress('')
+      setClientemail(''); setClientPhone(''); setJobOrderNumber(''); setJobCategory('')
+      setNewJobTasks([{ name: '', description: '', assigned_to: [], estimated_hours: '', value: '', deadline: '', noDeadline: false }])
       setShowCreateWithTasks(false)
-      setMessage('✅ Job și taskuri create!')
-      setTimeout(() => setMessage(null), 3000)
+      setMessage('Job și taskuri create!'); setTimeout(() => setMessage(null), 3000)
       fetchData()
-    } catch (err) {
-      console.error(err)
-      setError(err.message || 'Eroare la creare job')
-    } finally {
-      setLoading(false)
-    }
+    } catch (err) { setError(err.message || 'Eroare la creare job') } finally { setLoading(false) }
   }
 
-  const updateNewJobTaskField = (idx, field, value) => {
-    setNewJobTasks(prev => {
-      const copy = [...prev]
-      copy[idx][field] = value
-      return copy
-    })
-  }
+  const updateNewJobTaskField = (idx, field, value) => setNewJobTasks(prev => { const c = [...prev]; c[idx][field] = value; return c })
+  const addNewJobTask = () => setNewJobTasks(prev => [...prev, { name: '', description: '', assigned_to: [], estimated_hours: '', value: '', deadline: '', noDeadline: false }])
+  const removeNewJobTask = (idx) => setNewJobTasks(prev => prev.filter((_, i) => i !== idx))
 
-  const addNewJobTask = () => {
-    setNewJobTasks(prev => [...prev, { name: '', description: '', assigned_to: [], estimated_hours: '', deadline: '' }])
-  }
-
-  const removeNewJobTask = (idx) => {
-    setNewJobTasks(prev => prev.filter((_, i) => i !== idx))
-  }
-
-  // Editare job
   const startEditJob = (job) => {
     setEditingJobId(job.id)
-    setJobEdits({
-      name: job.name,
-      priority: job.priority || 'normal',
-      client_name: job.client_name || '',
-      client_phone: job.client_phone || '',
-      client_id_series: job.client_id_series || '',
-      client_cnp: job.client_cnp || '',
-      client_address: job.client_address || '',
-      client_email: job.client_email || '',
-      status: job.status,
-      total_value: job.total_value != null ? job.total_value : '',
-      amount_paid: job.amount_paid != null ? job.amount_paid : '',
-      order_number: job.order_number != null ? job.order_number : ''
+    const namedOptions = JOB_NAME_OPTIONS.filter(o => o !== 'Altele')
+    const nameType = namedOptions.includes(job.name) ? job.name : 'Altele'
+    const nameCustom = nameType === 'Altele' ? job.name : ''
+    setJobEdits({ nameType, nameCustom, priority: job.priority || 'normal', client_name: job.client_name, client_phone: job.client_phone || '', client_id_series: job.client_id_series || '', client_cnp: job.client_cnp || '', client_address: job.client_address || '', client_email: job.client_email || '', status: job.status, total_value: job.total_value ?? '', amount_paid: job.amount_paid ?? '', order_number: job.order_number ?? '', category: job.category || '' })
+    const jobTasks = tasks.filter(t => t.job_id === job.id)
+    const drafts = {}
+    jobTasks.forEach(t => {
+      drafts[t.id] = { name: t.name, description: t.description || '', status: t.status, assigned_to: Array.isArray(t.assigned_to) ? t.assigned_to : (t.assigned_to ? [t.assigned_to] : []), value: t.value || '', deadline: t.deadline || '' }
     })
+    setTaskDrafts(drafts)
   }
-
-  const cancelEditJob = () => {
-    setEditingJobId(null)
-    setJobEdits({})
-  }
+  const cancelEditJob = () => { setEditingJobId(null); setJobEdits({}); setTaskDrafts({}) }
 
   const saveJob = async (jobId) => {
-    setLoading(true)
-    setError(null)
+    setLoading(true); setError(null)
     try {
-      const updates = {}
-      if (jobEdits.name !== undefined) updates.name = jobEdits.name
-      if (jobEdits.client_name !== undefined) updates.client_name = jobEdits.client_name
-      if (jobEdits.client_email !== undefined) updates.client_email = jobEdits.client_email || null
-      if (jobEdits.client_phone !== undefined) updates.client_phone = jobEdits.client_phone || null
-      if (jobEdits.status !== undefined) updates.status = jobEdits.status
-      /* Admin is not allowed to manually edit job total here; total_value is
-         calculated from task values and updated automatically. */
-      // Allow admins to set/override job total_value manually when editing
-      // (will be persisted to `jobs.total_value`). Note: task updates still
-      // recalculate total_value based on task.value and may overwrite this
-      // manual value if tasks are edited afterwards.
-      if (jobEdits.total_value !== undefined) updates.total_value = jobEdits.total_value !== '' ? parseFloat(jobEdits.total_value) : null
-      if (jobEdits.amount_paid !== undefined) updates.amount_paid = jobEdits.amount_paid !== '' ? parseFloat(jobEdits.amount_paid) : 0
-      if (jobEdits.order_number !== undefined) updates.order_number = jobEdits.order_number !== '' ? parseInt(jobEdits.order_number, 10) : null
-        // client_first_name and client_last_name are no longer updated
-      if (jobEdits.priority !== undefined) updates.priority = jobEdits.priority || 'normal'
-      if (jobEdits.client_id_series !== undefined) updates.client_id_series = jobEdits.client_id_series || null
-      if (jobEdits.client_cnp !== undefined) updates.client_cnp = jobEdits.client_cnp || null
-      if (jobEdits.client_address !== undefined) updates.client_address = jobEdits.client_address || null
-      // job-level description removed; task-level descriptions are used instead
+      const updates = {}; const f = jobEdits
+      if (f.nameType !== undefined) updates.name = f.nameType === 'Altele' ? (f.nameCustom || '').trim() : f.nameType
+      if (f.client_name !== undefined) updates.client_name = f.client_name
+      if (f.client_email !== undefined) updates.client_email = f.client_email || null
+      if (f.client_phone !== undefined) updates.client_phone = f.client_phone || null
+      if (f.status !== undefined) updates.status = f.status
+      if (f.total_value !== undefined) updates.total_value = f.total_value !== '' ? parseFloat(f.total_value) : null
+      if (f.amount_paid !== undefined) updates.amount_paid = f.amount_paid !== '' ? parseFloat(f.amount_paid) : 0
+      if (f.order_number !== undefined) updates.order_number = f.order_number !== '' ? parseInt(f.order_number, 10) : null
+      if (f.priority !== undefined) updates.priority = f.priority || 'normal'
+      if (f.client_id_series !== undefined) updates.client_id_series = f.client_id_series || null
+      if (f.client_cnp !== undefined) updates.client_cnp = f.client_cnp || null
+      if (f.client_address !== undefined) updates.client_address = f.client_address || null
+      if (f.category !== undefined) updates.category = f.category || null
 
       const { data, error: updErr } = await supabase.from('jobs').update(updates).eq('id', jobId).select()
       if (updErr) throw updErr
       setJobs(prev => prev.map(j => j.id === jobId ? data[0] : j))
-      setEditingJobId(null)
-      setJobEdits({})
-      setMessage('✅ Job actualizat!')
-      setTimeout(() => setMessage(null), 3000)
-    } catch (err) {
-      console.error(err)
-      setError(err.message || 'Eroare la actualizare job')
-    } finally {
-      setLoading(false)
-    }
+      setEditingJobId(null); setJobEdits({}); setTaskDrafts({})
+      setMessage('Job actualizat!'); setTimeout(() => setMessage(null), 3000)
+    } catch (err) { setError(err.message || 'Eroare la actualizare job') } finally { setLoading(false) }
+  }
+
+  const saveJobAndTasks = async (jobId) => {
+    setLoading(true); setError(null)
+    try {
+      const f = jobEdits
+      const jobUpdates = {}
+      if (f.nameType !== undefined) jobUpdates.name = f.nameType === 'Altele' ? (f.nameCustom || '').trim() : f.nameType
+      if (f.client_name !== undefined) jobUpdates.client_name = f.client_name
+      if (f.client_email !== undefined) jobUpdates.client_email = f.client_email || null
+      if (f.client_phone !== undefined) jobUpdates.client_phone = f.client_phone || null
+      if (f.status !== undefined) jobUpdates.status = f.status
+      if (f.amount_paid !== undefined) jobUpdates.amount_paid = f.amount_paid !== '' ? parseFloat(f.amount_paid) : 0
+      if (f.order_number !== undefined) jobUpdates.order_number = f.order_number !== '' ? parseInt(f.order_number, 10) : null
+      if (f.priority !== undefined) jobUpdates.priority = f.priority || 'normal'
+      if (f.client_id_series !== undefined) jobUpdates.client_id_series = f.client_id_series || null
+      if (f.client_cnp !== undefined) jobUpdates.client_cnp = f.client_cnp || null
+      if (f.client_address !== undefined) jobUpdates.client_address = f.client_address || null
+      if (f.category !== undefined) jobUpdates.category = f.category || null
+      const { data: jobData, error: jobErr } = await supabase.from('jobs').update(jobUpdates).eq('id', jobId).select()
+      if (jobErr) throw jobErr
+      setJobs(prev => prev.map(j => j.id === jobId ? jobData[0] : j))
+
+      for (const [taskId, draft] of Object.entries(taskDrafts)) {
+        const assigned = Array.isArray(draft.assigned_to) ? (draft.assigned_to.length > 0 ? draft.assigned_to : null) : null
+        const taskUpdates = {
+          name: draft.name,
+          description: draft.description || null,
+          status: draft.status,
+          assigned_to: assigned,
+          assigned_to_emails: assigned?.length > 0 ? assigned.map(id => profiles.find(p => p.id === id)?.email).filter(Boolean) : null,
+          value: draft.value ? parseFloat(draft.value) : null,
+          deadline: draft.deadline ? new Date(draft.deadline).toISOString() : null,
+        }
+        try {
+          const { data: td, error: te } = await supabase.from('tasks').update(taskUpdates).eq('id', taskId).select()
+          if (te) throw te
+          setTasks(prev => prev.map(t => t.id === taskId ? { ...td[0], assigned_to: Array.isArray(td[0].assigned_to) ? td[0].assigned_to : (td[0].assigned_to ? [td[0].assigned_to] : []), assigned_to_emails: Array.isArray(td[0].assigned_to_emails) ? td[0].assigned_to_emails : [] } : t))
+        } catch (te) {
+          if (te?.message?.includes('invalid input syntax for type uuid')) {
+            const bc = { ...taskUpdates, assigned_to: assigned?.length > 0 ? assigned[0] : null }
+            const { data: td2, error: te2 } = await supabase.from('tasks').update(bc).eq('id', taskId).select()
+            if (te2) throw te2
+            setTasks(prev => prev.map(t => t.id === taskId ? { ...td2[0], assigned_to: Array.isArray(td2[0].assigned_to) ? td2[0].assigned_to : (td2[0].assigned_to ? [td2[0].assigned_to] : []), assigned_to_emails: Array.isArray(td2[0].assigned_to_emails) ? td2[0].assigned_to_emails : [] } : t))
+          } else throw te
+        }
+      }
+      // Valoarea totală = suma valorilor taskurilor (după salvarea taskurilor)
+      await recalcJobTotal(jobId)
+      setEditingJobId(null); setJobEdits({}); setTaskDrafts({})
+      setMessage('Lucrare și taskuri salvate!'); setTimeout(() => setMessage(null), 3000)
+    } catch (err) { setError(err.message || 'Eroare la salvare') } finally { setLoading(false) }
   }
 
   const deleteJob = async (jobId) => {
-    if (!window.confirm('Sigur vrei să ștergi acest job? Toate taskurile asociate vor fi șterse!')) return
-    setLoading(true)
-    setError(null)
+    if (!window.confirm('Ștergi job-ul? Toate taskurile vor fi șterse!')) return
+    setLoading(true); setError(null)
     try {
       await supabase.from('tasks').delete().eq('job_id', jobId)
-      const { error: delErr } = await supabase.from('jobs').delete().eq('id', jobId)
-      if (delErr) throw delErr
+      const { error: e } = await supabase.from('jobs').delete().eq('id', jobId); if (e) throw e
       setJobs(prev => prev.filter(j => j.id !== jobId))
       setTasks(prev => prev.filter(t => t.job_id !== jobId))
-      setMessage('✅ Job șters!')
-      setTimeout(() => setMessage(null), 3000)
-    } catch (err) {
-      console.error(err)
-      setError(err.message || 'Eroare la ștergere job')
-    } finally {
-      setLoading(false)
-    }
+      if (activeSection === 'job_detail') setActiveSection(previousSection)
+      setMessage('Job șters!'); setTimeout(() => setMessage(null), 3000)
+    } catch (err) { setError(err.message) } finally { setLoading(false) }
   }
 
-  const handleAmountPaidChange = (jobId, value) => {
-    setAmountPaidDraft(prev => ({ ...prev, [jobId]: value }))
-  }
-
-  const saveAmountPaid = async (jobId) => {
-    const raw = amountPaidDraft[jobId]
-    const parsed = raw === '' || raw == null ? 0 : parseFloat(raw)
-    setLoading(true)
-    setError(null)
+  const duplicateJob = async (job) => {
+    setLoading(true); setError(null)
     try {
-      const { data, error: updErr } = await supabase.from('jobs').update({ amount_paid: isNaN(parsed) ? 0 : parsed }).eq('id', jobId).select()
-      if (updErr) throw updErr
-      const updated = data && data[0] ? data[0] : null
-      if (updated) setJobs(prev => prev.map(j => j.id === jobId ? updated : j))
-      setMessage('✅ Bani încasați actualizați')
-      setTimeout(() => setMessage(null), 2500)
-    } catch (err) {
-      console.error(err)
-      setError(err.message || 'Eroare la actualizare încasări')
-    } finally {
-      setLoading(false)
-    }
+      const { order_number, completed_at, amount_paid, status, id, created_at, updated_at, ...rest } = job
+      const newJob = { ...rest, name: `${job.name} (copie)`, status: 'todo', amount_paid: 0, total_value: 0, order_number: null, completed_at: null }
+      const { data: newJobData, error: je } = await supabase.from('jobs').insert([newJob]).select()
+      if (je) throw je
+      const newJobId = newJobData[0].id
+      const srcTasks = tasks.filter(t => t.job_id === job.id).sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
+      const base = Date.now()
+      const tasksCopy = srcTasks.map((t, i) => {
+        const { id: _id, job_id: _jid, created_at: _ca, updated_at: _ua, completed_at: _ta, completed_by: _cb, completed_by_email: _cbe, completers: _compl, ...tRest } = t
+        return { ...tRest, job_id: newJobId, status: 'todo', completed_at: null, completed_by: null, completed_by_email: null, completers: [], created_at: new Date(base + i).toISOString() }
+      })
+      if (tasksCopy.length > 0) {
+        const { error: te } = await supabase.from('tasks').insert(tasksCopy)
+        if (te) throw te
+      }
+      const totalValue = srcTasks.reduce((s, t) => s + (parseFloat(t.value) || 0), 0)
+      if (totalValue > 0) await supabase.from('jobs').update({ total_value: totalValue }).eq('id', newJobId)
+      await fetchData()
+      setSelectedJobId(newJobId)
+      setActiveSection('job_detail')
+      setMessage(`Lucrare duplicată: "${job.name} (copie)"`); setTimeout(() => setMessage(null), 3000)
+    } catch (err) { setError(err.message || 'Eroare la duplicare') } finally { setLoading(false) }
   }
 
-  // Editare task
+  const handleAmountPaidChange = (jobId, value) => setAmountPaidDraft(prev => ({ ...prev, [jobId]: value }))
+  const saveAmountPaid = async (jobId) => {
+    const raw = amountPaidDraft[jobId]; const parsed = raw === '' || raw == null ? 0 : parseFloat(raw)
+    setLoading(true); setError(null)
+    try {
+      const { data, error: e } = await supabase.from('jobs').update({ amount_paid: isNaN(parsed) ? 0 : parsed }).eq('id', jobId).select()
+      if (e) throw e
+      if (data?.[0]) setJobs(prev => prev.map(j => j.id === jobId ? data[0] : j))
+      setMessage('Bani încasați actualizați'); setTimeout(() => setMessage(null), 2500)
+    } catch (err) { setError(err.message) } finally { setLoading(false) }
+  }
+
   const startEditTask = (task) => {
     setEditingTaskId(task.id)
-    setTaskEdits({
-      name: task.name,
-      description: task.description || '',
-      status: task.status,
-      assigned_to: Array.isArray(task.assigned_to) ? task.assigned_to : task.assigned_to ? [task.assigned_to] : [],
-      estimated_hours: task.estimated_hours || '',
-      deadline: task.deadline || ''
-    })
+    setTaskEdits({ name: task.name, description: task.description || '', status: task.status, assigned_to: Array.isArray(task.assigned_to) ? task.assigned_to : task.assigned_to ? [task.assigned_to] : [], estimated_hours: task.estimated_hours || '', value: task.value || '', deadline: task.deadline || '' })
   }
-
-  const cancelEditTask = () => {
-    setEditingTaskId(null)
-    setTaskEdits({})
-  }
+  const cancelEditTask = () => { setEditingTaskId(null); setTaskEdits({}) }
 
   const saveTask = async (taskId) => {
-    setLoading(true)
-    setError(null)
+    setLoading(true); setError(null)
     try {
       const updates = {}
       if (taskEdits.name !== undefined) updates.name = taskEdits.name
       if (taskEdits.description !== undefined) updates.description = taskEdits.description
       if (taskEdits.status !== undefined) updates.status = taskEdits.status
-      // assignments are stored in tasks.assigned_to array column; include them in updates
       if (taskEdits.assigned_to !== undefined) {
-        updates.assigned_to = Array.isArray(taskEdits.assigned_to) ? taskEdits.assigned_to : taskEdits.assigned_to ? [taskEdits.assigned_to] : []
+        updates.assigned_to = Array.isArray(taskEdits.assigned_to) ? (taskEdits.assigned_to.length > 0 ? taskEdits.assigned_to : null) : (taskEdits.assigned_to ? [taskEdits.assigned_to] : null)
+        updates.assigned_to_emails = updates.assigned_to?.length > 0 ? (updates.assigned_to.map(id => profiles.find(p => p.id === id)?.email).filter(Boolean)) : null
       }
-      if (taskEdits.estimated_hours !== undefined) {
-        updates.estimated_hours = taskEdits.estimated_hours ? parseFloat(taskEdits.estimated_hours) : null
-      }
-      if (taskEdits.deadline !== undefined) {
-        updates.deadline = taskEdits.deadline ? (new Date(taskEdits.deadline)).toISOString() : null
-      }
+      if (taskEdits.value !== undefined) updates.value = taskEdits.value ? parseFloat(taskEdits.value) : null
+      if (taskEdits.deadline !== undefined) updates.deadline = taskEdits.deadline ? new Date(taskEdits.deadline).toISOString() : null
 
-      // Try update, if DB expects scalar uuid for `assigned_to` and errors,
-      // retry with first element to remain compatible until migration runs.
       let data
       try {
         const res = await supabase.from('tasks').update(updates).eq('id', taskId).select()
-        if (res.error) throw res.error
-        data = res.data
+        if (res.error) throw res.error; data = res.data
       } catch (err) {
-        if (err?.message && err.message.includes('invalid input syntax for type uuid')) {
-          const backCompat = { ...updates }
-          if (Array.isArray(backCompat.assigned_to)) backCompat.assigned_to = backCompat.assigned_to.length > 0 ? backCompat.assigned_to[0] : null
-          const res2 = await supabase.from('tasks').update(backCompat).eq('id', taskId).select()
-          if (res2.error) throw res2.error
-          data = res2.data
-        } else {
-          throw err
-        }
+        if (err?.message?.includes('invalid input syntax for type uuid')) {
+          const bc = { ...updates }; if (Array.isArray(bc.assigned_to)) bc.assigned_to = bc.assigned_to.length > 0 ? bc.assigned_to[0] : null
+          const r2 = await supabase.from('tasks').update(bc).eq('id', taskId).select(); if (r2.error) throw r2.error; data = r2.data
+        } else throw err
       }
-      const { data: refreshedArr, error: refErr } = await supabase.from('tasks').select('*').eq('id', taskId).single()
-      if (refErr) throw refErr
-      const refreshedTask = refreshedArr
-      const assignedIds = Array.isArray(refreshedTask.assigned_to) ? refreshedTask.assigned_to : (refreshedTask.assigned_to ? [refreshedTask.assigned_to] : [])
-      const assignedEmails = assignedIds.map(pid => (profiles.find(p => p.id === pid) || {}).email).filter(Boolean)
-      const newTaskObj = { ...refreshedTask, assigned_to: assignedIds, assigned_to_emails: assignedEmails }
-      setTasks(prev => prev.map(t => t.id === taskId ? newTaskObj : t))
-      setEditingTaskId(null)
-      setTaskEdits({})
-      setMessage('✅ Task actualizat!')
-      setTimeout(() => setMessage(null), 3000)
-      // recalc job total in case task value changed
-      if (data && data[0] && data[0].job_id) {
-        const jobId = data[0].job_id
-        const { data: jobTasks, error } = await supabase.from('tasks').select('value').eq('job_id', jobId)
-        if (!error) {
-          const total = (jobTasks || []).reduce((s, t) => s + (parseFloat(t.value) || 0), 0)
-          await supabase.from('jobs').update({ total_value: total }).eq('id', jobId)
-          setJobs(prev => prev.map(j => j.id === jobId ? { ...j, total_value: total } : j))
-        }
-      }
-    } catch (err) {
-      console.error(err)
-      setError(err.message || 'Eroare la actualizare task')
-    } finally {
-      setLoading(false)
-    }
+      setTasks(prev => prev.map(t => t.id === taskId ? data[0] : t))
+      setEditingTaskId(null); setTaskEdits({})
+      setMessage('Task actualizat!'); setTimeout(() => setMessage(null), 3000)
+      if (data?.[0]?.job_id) recalcJobTotal(data[0].job_id)
+    } catch (err) { setError(err.message) } finally { setLoading(false) }
   }
 
   const deleteTask = async (taskId) => {
-    if (!window.confirm('Sigur vrei să ștergi acest task?')) return
-    setLoading(true)
-    setError(null)
+    if (!window.confirm('Ștergi task-ul?')) return
+    setLoading(true); setError(null)
     try {
       const task = tasks.find(t => t.id === taskId)
-      const { error: delErr } = await supabase.from('tasks').delete().eq('id', taskId)
-      if (delErr) throw delErr
+      const { error: e } = await supabase.from('tasks').delete().eq('id', taskId); if (e) throw e
       setTasks(prev => prev.filter(t => t.id !== taskId))
-      setMessage('✅ Task șters!')
-      setTimeout(() => setMessage(null), 3000)
-      if (task && task.job_id) {
-        // recalc job total
-        const { data: jobTasks, error } = await supabase.from('tasks').select('value').eq('job_id', task.job_id)
-        if (!error) {
-          const total = (jobTasks || []).reduce((s, t) => s + (parseFloat(t.value) || 0), 0)
-          await supabase.from('jobs').update({ total_value: total }).eq('id', task.job_id)
-          setJobs(prev => prev.map(j => j.id === task.job_id ? { ...j, total_value: total } : j))
-        }
-      }
-    } catch (err) {
-      console.error(err)
-      setError(err.message || 'Eroare la ștergere task')
-    } finally {
-      setLoading(false)
-    }
+      setMessage('Task șters!'); setTimeout(() => setMessage(null), 3000)
+      if (task?.job_id) recalcJobTotal(task.job_id)
+    } catch (err) { setError(err.message) } finally { setLoading(false) }
   }
 
   const toggleComplete = async (task) => {
     const newStatus = task.status === 'completed' ? 'todo' : 'completed'
     const job = jobs.find(j => j.id === task.job_id)
-
+    let updates
     if (newStatus === 'completed') {
-      const existingCompleters = Array.isArray(task.completers) ? task.completers.slice() : (
-        task.completed_by ? [{ id: task.completed_by, email: task.completed_by_email, completed_at: task.completed_at }] : []
-      )
-      const already = existingCompleters.find(c => c.id === user.id)
-      if (already) {
-        setMessage('✅ Ai marcat deja acest task ca finalizat')
-        setTimeout(() => setMessage(null), 3000)
-        return
-      }
-      if (existingCompleters.length >= 2) {
-        setMessage('⚠️ Acest task are deja doi finalizatori')
-        setTimeout(() => setMessage(null), 3000)
-        return
-      }
-      const newCompleter = { id: user.id, email: user.email, completed_at: new Date().toISOString() }
-      const newCompleters = existingCompleters.concat([newCompleter])
-      const taskValue = task.value != null ? parseFloat(task.value) : null
-      if (taskValue != null) {
-        const share = parseFloat((taskValue / newCompleters.length).toFixed(2))
-        newCompleters.forEach(c => { c.amount = share })
-      }
-      var updates = { status: 'completed', completed_at: newCompleters[0] ? newCompleters[0].completed_at : new Date().toISOString(), completers: newCompleters, completed_by: newCompleters[0] ? newCompleters[0].id : null, completed_by_email: newCompleters[0] ? newCompleters[0].email : null }
+      const existing = Array.isArray(task.completers) ? task.completers.slice() : (task.completed_by ? [{ id: task.completed_by, email: task.completed_by_email, completed_at: task.completed_at }] : [])
+      if (existing.find(c => c.id === user?.id)) { setMessage('Ai marcat deja acest task'); setTimeout(() => setMessage(null), 2000); return }
+      if (existing.length >= 2) { setMessage('Task are deja doi finalizatori'); setTimeout(() => setMessage(null), 2000); return }
+      const newC = { id: user?.id, email: user?.email, completed_at: new Date().toISOString() }
+      const newCompleters = existing.concat([newC])
+      const tv = task.value != null ? parseFloat(task.value) : null
+      if (tv != null) { const share = parseFloat((tv / newCompleters.length).toFixed(2)); newCompleters.forEach(c => { c.amount = share }) }
+      updates = { status: 'completed', completed_at: newCompleters[0]?.completed_at || new Date().toISOString(), completers: newCompleters, completed_by: newCompleters[0]?.id || null, completed_by_email: newCompleters[0]?.email || null }
     } else {
-      // undo: clear completers and legacy fields
-      var updates = { status: 'todo', completed_at: null, completers: [], completed_by: null, completed_by_email: null }
+      updates = { status: 'todo', completed_at: null, completers: [], completed_by: null, completed_by_email: null }
     }
     setLoading(true)
     try {
       const { data, error: err } = await supabase.from('tasks').update(updates).eq('id', task.id).select()
       if (err) throw err
-      
-      // Actualizează lista de task-uri
       const updatedTasks = tasks.map(t => t.id === task.id ? data[0] : t)
       setTasks(updatedTasks)
-      
-      // Dacă e completat, trimite email pentru JOB doar când toate taskurile sunt finalizate
-      if (newStatus === 'completed') {
-        // Trimite email pentru TASK (fiecare task la finalizare)
-        try {
-          await sendTaskCompletionEmail({
-            to: job && job.client_email ? job.client_email : null,
-            clientName: job && job.client_name ? job.client_name : null,
-            jobName: job ? job.name : null,
-            taskName: data[0].name,
-            taskDescription: data[0].description,
-            taskValue: data[0].value,
-            completedAt: data[0].completed_at
-          })
-        } catch (err) {
-          console.warn('Task email failed', err)
-        }
-
-        const job = jobs.find(j => j.id === task.job_id)
-        // use the updatedTasks array to determine completion state
-        if (job && job.client_email) {
-          const allCompleted = areAllTasksCompleted(updatedTasks, task.job_id)
-          if (allCompleted) {
-            const jobTasks = updatedTasks.filter(t => t.job_id === task.job_id)
-            const totalValue = (jobTasks || []).reduce((s, t) => s + (parseFloat(t.value) || 0), 0)
-            const completedAt = new Date().toISOString()
-            // send job email (no PDF by default)
-            // mark job as completed in DB (so UI can depend on job.status too)
-            try {
-              await supabase.from('jobs').update({ status: 'completed', completed_at: completedAt }).eq('id', job.id)
-              setJobs(prev => prev.map(j => j.id === job.id ? { ...j, status: 'completed', completed_at: completedAt } : j))
-            } catch (updErr) {
-              console.warn('Could not update job status to completed', updErr)
-            }
-
-            sendJobCompletionEmail({
-              to: job.client_email,
-              clientName: job.client_name,
-              jobName: job.name,
-              tasks: jobTasks,
-              totalValue,
-              completedAt,
-              // legacy first/last removed; frontend uses clientName only
-              clientCNP: job.client_cnp,
-              clientSeries: job.client_id_series,
-              clientAddress: job.client_address
-            }).then(res => {
-              if (res && !res.ok) console.warn('⚠️ Job email failed', res)
-            }).catch(err => console.error('Job email error', err))
-          }
+      // Refresh job from server — server auto-marks it completed when all tasks done
+      try {
+        const { data: freshJob } = await supabase.from('jobs').select().eq('id', task.job_id)
+        if (freshJob && freshJob[0]) setJobs(prev => prev.map(j => j.id === task.job_id ? { ...j, ...freshJob[0] } : j))
+      } catch (e) { console.warn('job refresh failed', e) }
+      if (newStatus === 'completed' && job?.client_email) {
+        try { await sendTaskCompletionEmail({ to: job.client_email, clientName: job.client_name, jobName: job.name, taskName: data[0].name, taskDescription: data[0].description, taskValue: data[0].value, completedAt: data[0].completed_at }) } catch (e) { console.warn(e) }
+        if (areAllTasksCompleted(updatedTasks, task.job_id)) {
+          const jobTasks = updatedTasks.filter(t => t.job_id === task.job_id)
+          const totalValue = jobTasks.reduce((s, t) => s + (parseFloat(t.value) || 0), 0)
+          const completedAt = new Date().toISOString()
+          try { await sendJobCompletionEmail({ to: job.client_email, clientName: job.client_name, jobName: job.name, tasks: jobTasks, totalValue, completedAt, clientCNP: job.client_cnp, clientSeries: job.client_id_series, clientAddress: job.client_address }) } catch (e) { console.error(e) }
         }
       }
-    } catch (err) {
-      console.error(err)
-      setError(err.message || 'Eroare la actualizare status')
-    } finally {
-      setLoading(false)
-    }
+    } catch (err) { setError(err.message) } finally { setLoading(false) }
   }
 
-  // Adăugare task la job existent
-  const startAddTaskToJob = (jobId) => {
-    setAddingTaskToJob(jobId)
-    setNewTaskData({ name: '', description: '', assigned_to: [], estimated_hours: '', deadline: '' })
-  }
-
-  const cancelAddTask = () => {
-    setAddingTaskToJob(null)
-    setNewTaskData({ name: '', description: '', assigned_to: [], estimated_hours: '', deadline: '' })
-  }
+  const startAddTaskToJob = (jobId) => { setAddingTaskToJob(jobId); setNewTaskData({ name: '', description: '', assigned_to: [], estimated_hours: '', value: '', deadline: '', noDeadline: false }) }
+  const cancelAddTask = () => { setAddingTaskToJob(null); setNewTaskData({ name: '', description: '', assigned_to: [], estimated_hours: '', value: '', deadline: '', noDeadline: false }) }
 
   const handleAddTask = async (e) => {
     e.preventDefault()
-    setLoading(true)
-    setError(null)
+    if (!newTaskData.noDeadline && !newTaskData.deadline) { setError('Setează un deadline sau bifează "Fără termen".'); return }
+    setLoading(true); setError(null)
     try {
-      const assignedArr = Array.isArray(newTaskData.assigned_to) ? newTaskData.assigned_to : newTaskData.assigned_to ? [newTaskData.assigned_to] : []
-      const taskToInsert = {
-        job_id: addingTaskToJob,
-        name: newTaskData.name,
-        status: 'todo',
-        description: newTaskData.description || null,
-        assigned_to: assignedArr.length > 0 ? assignedArr : null,
-        assigned_to_emails: null,
-        estimated_hours: newTaskData.estimated_hours ? parseFloat(newTaskData.estimated_hours) : null,
-        value: null,
-        deadline: newTaskData.deadline ? (new Date(newTaskData.deadline)).toISOString() : null,
-        created_by: user.id
-      }
-      // Insert with same safe-retry logic as bulk insert
+      const assignedArr = Array.isArray(newTaskData.assigned_to) ? newTaskData.assigned_to : (newTaskData.assigned_to ? [newTaskData.assigned_to] : [])
+      const taskToInsert = { job_id: addingTaskToJob, name: newTaskData.name, description: newTaskData.description || null, status: 'todo', assigned_to: assignedArr.length > 0 ? assignedArr : null, assigned_to_emails: null, value: newTaskData.value ? parseFloat(newTaskData.value) : null, deadline: newTaskData.noDeadline ? null : (newTaskData.deadline ? new Date(newTaskData.deadline).toISOString() : null), created_by: user?.id || null }
       try {
-        const { data: inserted, error: addErr } = await supabase.from('tasks').insert([taskToInsert]).select()
-        if (addErr) throw addErr
+        const { error: e } = await supabase.from('tasks').insert([taskToInsert]); if (e) throw e
       } catch (err) {
-        if (err?.message && err.message.includes('invalid input syntax for type uuid')) {
-          const transformed = { ...taskToInsert, assigned_to: Array.isArray(taskToInsert.assigned_to) && taskToInsert.assigned_to.length > 0 ? taskToInsert.assigned_to[0] : taskToInsert.assigned_to }
-          const { data: retried, error: retryErr } = await supabase.from('tasks').insert([transformed]).select()
-          if (retryErr) throw retryErr
-        } else {
-          throw err
-        }
+        if (err?.message?.includes('invalid input syntax for type uuid')) { const t2 = { ...taskToInsert, assigned_to: Array.isArray(taskToInsert.assigned_to) ? taskToInsert.assigned_to[0] : taskToInsert.assigned_to }; const { error: e2 } = await supabase.from('tasks').insert([t2]); if (e2) throw e2 } else throw err
       }
-
-      setNewTaskData({ name: '', description: '', assigned_to: [], estimated_hours: '', deadline: '' })
-      setAddingTaskToJob(null)
-      setMessage('✅ Task adăugat!')
-      setTimeout(() => setMessage(null), 3000)
-      fetchData()
-    } catch (err) {
-      console.error('Add task error', err)
-      setError(err.message || 'Eroare la adăugare task')
-    } finally {
-      setLoading(false)
-    }
+      cancelAddTask(); setMessage('Task adăugat!'); setTimeout(() => setMessage(null), 3000)
+      fetchData(); recalcJobTotal(addingTaskToJob)
+    } catch (err) { setError(err.message) } finally { setLoading(false) }
   }
 
-  // Gestionare angajați (profiles)
-  const startEditProfile = (profile) => {
-    setEditingProfileId(profile.id)
-    setProfileEdits({
-      email: profile.email || '',
-      full_name: profile.full_name || '',
-      role: profile.role || 'employee'
-    })
-  }
-
-  const cancelEditProfile = () => {
-    setEditingProfileId(null)
-    setProfileEdits({})
-  }
+  const startEditProfile = (profile) => { setEditingProfileId(profile.id); setProfileEdits({ email: profile.email || '', full_name: profile.full_name || '', role: profile.role || 'employee' }) }
+  const cancelEditProfile = () => { setEditingProfileId(null); setProfileEdits({}) }
 
   const saveProfile = async (profileId) => {
-    setLoading(true)
-    setError(null)
+    setLoading(true); setError(null)
     try {
       const token = localStorage.getItem('access_token')
-      const payload = {}
-      if (profileEdits.email !== undefined) payload.email = profileEdits.email
-      if (profileEdits.full_name !== undefined) payload.full_name = profileEdits.full_name
-      if (profileEdits.role !== undefined) payload.role = profileEdits.role
-
-      const resp = await fetch(`/api/profiles/${profileId}`, {
-        method: 'PATCH',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: token ? `Bearer ${token}` : ''
-        },
-        body: JSON.stringify(payload)
-      })
-      const body = await resp.json()
-      if (!resp.ok) throw new Error(body.error || 'Eroare la actualizare profil')
-
+      const resp = await fetch(`/api/profiles/${profileId}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json', Authorization: token ? `Bearer ${token}` : '' }, body: JSON.stringify(profileEdits) })
+      const body = await resp.json(); if (!resp.ok) throw new Error(body.error)
       setProfiles(prev => prev.map(p => p.id === profileId ? body.profile : p))
-      setEditingProfileId(null)
-      setProfileEdits({})
-      setMessage('✅ Profil actualizat cu succes!')
-      setTimeout(() => setMessage(null), 3000)
-    } catch (err) {
-      console.error(err)
-      setError(err.message || 'Eroare la actualizare profil')
-    } finally {
-      setLoading(false)
-    }
+      cancelEditProfile(); setMessage('Profil actualizat!'); setTimeout(() => setMessage(null), 3000)
+    } catch (err) { setError(err.message) } finally { setLoading(false) }
+  }
+
+  const setProfileRole = async (profileId, newRole) => {
+    const profile = profiles.find(p => p.id === profileId)
+    if (!profile) return
+    if (!window.confirm(`Schimbi rolul lui ${profile.full_name || profile.email} la ${newRole}?`)) return
+    setLoading(true); setError(null)
+    try {
+      const token = localStorage.getItem('access_token')
+      const resp = await fetch(`/api/profiles/${profileId}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json', Authorization: token ? `Bearer ${token}` : '' }, body: JSON.stringify({ role: newRole }) })
+      const body = await resp.json(); if (!resp.ok) throw new Error(body.error)
+      setProfiles(prev => prev.map(p => p.id === profileId ? body.profile : p))
+      setMessage('Rol actualizat!'); setTimeout(() => setMessage(null), 3000)
+    } catch (err) { setError(err.message) } finally { setLoading(false) }
   }
 
   const deleteProfile = async (profileId) => {
-    const profile = profiles.find(p => p.id === profileId)
-
-    // Protejează contul CEO principal
-    if (profile?.email === 'overviewview8@gmail.com') {
-      setError('❌ Nu poți șterge contul CEO principal!')
-      setTimeout(() => setError(null), 3000)
-      return
-    }
-
-    if (!window.confirm('Sigur vrei să ștergi acest angajat? Se va șterge și din auth.users!\n\nAceastă acțiune este ireversibilă!')) return
-
-    setLoading(true)
-    setError(null)
+    if (!window.confirm('Ștergi colaboratorul?')) return
+    setLoading(true); setError(null)
     try {
-      // First, delete from auth.users using API endpoint
-      const deleteAuthResponse = await fetch('/api/delete-user', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId: profileId })
-      })
-
-      if (!deleteAuthResponse.ok) {
-        const errData = await deleteAuthResponse.json()
-        throw new Error(errData.error || 'Failed to delete from auth.users')
-      }
-
-      // Then delete from profiles table
-      const { error: delErr } = await supabase.from('profiles').delete().eq('id', profileId)
-      if (delErr) throw delErr
-
+      const delAuth = await fetch('/api/delete-user', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ userId: profileId }) })
+      if (!delAuth.ok) { const e = await delAuth.json(); throw new Error(e.error) }
+      const { error: e } = await supabase.from('profiles').delete().eq('id', profileId); if (e) throw e
       setProfiles(prev => prev.filter(p => p.id !== profileId))
-      setMessage('✅ Angajat șters cu succes din auth.users și profiles!')
-      setTimeout(() => setMessage(null), 3000)
-    } catch (err) {
-      console.error(err)
-      setError(err.message || 'Eroare la ștergere angajat')
-    } finally {
-      setLoading(false)
-    }
+      setMessage('Colaborator șters!'); setTimeout(() => setMessage(null), 3000)
+    } catch (err) { setError(err.message) } finally { setLoading(false) }
   }
 
-  // Funcții creare profil nou
-  const handleCreateNewProfile = async (e) => {
-    e.preventDefault()
-    setError(null)
-    setMessage(null)
+  const handleChangePassword = async (profile) => {
+    if (!profile) return
+    const p1 = window.prompt(`Noua parolă pentru ${profile.full_name || profile.email}:`); if (!p1) return
+    const p2 = window.prompt('Confirmă parola:')
+    if (p1 !== p2) { setError('Parolele nu se potrivesc!'); setTimeout(() => setError(null), 3000); return }
+    if (p1.length < 6) { setError('Parola prea scurtă!'); setTimeout(() => setError(null), 3000); return }
+    setLoading(true); setError(null)
+    try {
+      const token = localStorage.getItem('access_token')
+      const resp = await fetch('/api/users/change-password', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: token ? `Bearer ${token}` : '' }, body: JSON.stringify({ id: profile.id, email: profile.email, new_password: p1 }) })
+      const body = await resp.json(); if (!resp.ok) throw new Error(body.error)
+      setMessage('Parolă schimbată!'); setTimeout(() => setMessage(null), 3000)
+    } catch (err) { setError(err.message) } finally { setLoading(false) }
+  }
 
-    // Normalize & validări
+  const handleCreateNewProfile = async (e) => {
+    e.preventDefault(); setError(null)
     const email = (newProfileData.email || '').trim().toLowerCase()
     const full_name = (newProfileData.full_name || '').trim()
     const password = newProfileData.password || ''
-    const confirmPassword = newProfileData.confirmPassword || ''
-
-    if (!email || !password || !full_name) {
-      setError('❌ Email, parolă și nume sunt obligatorii!')
-      return
-    }
-
-    if (password !== confirmPassword) {
-      setError('❌ Parolele nu se potrivesc!')
-      return
-    }
-
-    if (password.length < 6) {
-      setError('❌ Parola trebuie să aibă cel puțin 6 caractere!')
-      return
-    }
-
+    if (!email || !password || !full_name) { setError('Email, parolă și nume sunt obligatorii!'); return }
+    if (password !== newProfileData.confirmPassword) { setError('Parolele nu se potrivesc!'); return }
+    if (password.length < 6) { setError('Parola prea scurtă!'); return }
     setLoading(true)
-
     try {
       const token = localStorage.getItem('access_token')
-      const resp = await fetch('/api/auth/register', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: token ? `Bearer ${token}` : ''
-        },
-        body: JSON.stringify({
-          email,
-          password,
-          full_name,
-          role: newProfileData.role
-        })
-      })
-
-      const body = await resp.json()
-      if (!resp.ok) throw new Error(body.error || 'Eroare la crearea profilului')
-
-      // Success
-      setMessage('✅ Profil nou creat cu succes!')
-      setNewProfileData({ email: '', password: '', confirmPassword: '', full_name: '', role: 'employee' })
-      setShowCreateProfile(false)
-      
-      // Refresh profiles list
-      await fetchProfiles()
-      setTimeout(() => setMessage(null), 3000)
-    } catch (err) {
-      console.error(err)
-      setError(err.message || 'Eroare la crearea profilului')
-    } finally {
-      setLoading(false)
-    }
+      const resp = await fetch('/api/auth/register', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: token ? `Bearer ${token}` : '' }, body: JSON.stringify({ email, password, full_name, role: newProfileData.role }) })
+      const body = await resp.json(); if (!resp.ok) throw new Error(body.error)
+      setMessage('Profil creat!'); setNewProfileData({ email: '', password: '', confirmPassword: '', full_name: '', role: 'employee' }); setShowCreateProfile(false)
+      await fetchProfiles(); setTimeout(() => setMessage(null), 3000)
+    } catch (err) { setError(err.message) } finally { setLoading(false) }
   }
 
-  // Funcții calendar
   const getDaysInMonth = (date) => {
-    const year = date.getFullYear()
-    const month = date.getMonth()
-    const firstDay = new Date(year, month, 1)
-    const lastDay = new Date(year, month + 1, 0)
-    const daysInMonth = lastDay.getDate()
-    const startingDayOfWeek = firstDay.getDay()
-    
-    return { daysInMonth, startingDayOfWeek, year, month }
+    const year = date.getFullYear(); const month = date.getMonth()
+    const firstDay = new Date(year, month, 1); const lastDay = new Date(year, month + 1, 0)
+    return { daysInMonth: lastDay.getDate(), startingDayOfWeek: firstDay.getDay(), year, month }
   }
-
+  const calculateEstimatedDate = (hours) => {
+    if (!hours || hours <= 0) return null
+    let wh = hours; let d = new Date()
+    while (wh > 0) { const dow = d.getDay(); if (dow !== 0 && dow !== 6) wh -= 8; if (wh > 0) d.setDate(d.getDate() + 1) }
+    return d
+  }
   const getTasksForDate = (date) => {
-    const dateStr = date.toISOString().split('T')[0]
+    const ds = date.toISOString().split('T')[0]
     return tasks.filter(task => {
-      if (task.completed_at) {
-        const completedDate = new Date(task.completed_at).toISOString().split('T')[0]
-        if (completedDate === dateStr) return true
-      }
-      if (task.created_at) {
-        const createdDate = new Date(task.created_at).toISOString().split('T')[0]
-        if (createdDate === dateStr) return true
-      }
-      if (task.estimated_hours) {
-        const estimatedDate = calculateEstimatedDate(task.estimated_hours)
-        if (estimatedDate && estimatedDate.toISOString().split('T')[0] === dateStr) return true
-      }
+      if (task.completed_at && new Date(task.completed_at).toISOString().split('T')[0] === ds) return true
+      if (task.created_at && new Date(task.created_at).toISOString().split('T')[0] === ds) return true
+      if (task.deadline && new Date(task.deadline).toISOString().split('T')[0] === ds) return true
+      if (task.estimated_hours) { const ed = calculateEstimatedDate(task.estimated_hours); if (ed && ed.toISOString().split('T')[0] === ds) return true }
       return false
     })
   }
-
   const getJobsForDate = (date) => {
-    const dateStr = date.toISOString().split('T')[0]
+    const ds = date.toISOString().split('T')[0]
     return jobs.filter(job => {
-      if (job.completed_at) {
-        const completedDate = new Date(job.completed_at).toISOString().split('T')[0]
-        if (completedDate === dateStr) return true
-      }
-      if (job.created_at) {
-        const createdDate = new Date(job.created_at).toISOString().split('T')[0]
-        if (createdDate === dateStr) return true
-      }
+      if (job.completed_at && new Date(job.completed_at).toISOString().split('T')[0] === ds) return true
+      if (job.created_at && new Date(job.created_at).toISOString().split('T')[0] === ds) return true
       return false
     })
   }
+  const hasEventsOnDate = (date) => getTasksForDate(date).length > 0 || getJobsForDate(date).length > 0
+  const navigateMonth = (dir) => setCurrentMonth(prev => { const d = new Date(prev); d.setMonth(d.getMonth() + dir); return d })
+  const navigateReportMonth = (dir) => setReportMonth(prev => { const d = new Date(prev); d.setMonth(d.getMonth() + dir); return d })
 
-  const downloadPdfForJob = async (job) => {
-    try {
-      // Try to assign a sequential order number via DB RPC. If it fails,
-      // fall back to any existing job.order_number or omit.
-      let assignedOrder = null
-      try {
-        const rpcRes = await supabase.rpc('assign_job_order', { p_job_id: job.id })
-        if (rpcRes && rpcRes.data != null) {
-          // rpc may return scalar or array; handle both
-          if (Array.isArray(rpcRes.data)) assignedOrder = rpcRes.data[0]
-          else assignedOrder = rpcRes.data
-        }
-      } catch (rpcErr) {
-        console.warn('assign_job_order RPC failed', rpcErr)
-      }
-
-      const jobTasks = tasks.filter(t => t.job_id === job.id).sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
-      const totalValue = (jobTasks || []).reduce((s, t) => s + (parseFloat(t.value) || 0), 0)
-      const pdfData = {
-        template: 'blank',
-        clientName: job.client_name,
-        clientCNP: job.client_cnp || null,
-        clientSeries: job.client_id_series || null,
-        clientAddress: job.client_address || null,
-        clientEmail: job.client_email || null,
-        jobName: job.name,
-        tasks: jobTasks,
-        totalValue,
-        completedAt: job.completed_at || new Date().toISOString(),
-        receptionNumber: job.reception_number || job.receptionNumber || null,
-        orderNumber: job.order_number != null ? job.order_number : (assignedOrder != null ? assignedOrder : null)
-      }
-      // generate client-side and download
-      const { generateAndDownloadPdf } = await import('../utils/generatePdfClient')
-      const res = await generateAndDownloadPdf(pdfData)
-      if (!res || !res.ok) {
-        setError(res && res.error ? res.error : 'Eroare generare PDF')
-      }
-    } catch (err) {
-      console.error('downloadPdfForJob error', err)
-      setError(err.message || 'Eroare la descarcare PDF')
-    }
+  const handleLogout = () => {
+    try { localStorage.removeItem('access_token') } catch (e) {}
+    navigate('/'); setTimeout(() => window.location.reload(), 50)
   }
 
-  const hasEventsOnDate = (date) => {
-    return getTasksForDate(date).length > 0 || getJobsForDate(date).length > 0
-  }
+  const activeJobs = jobs.filter(j => j.status !== 'completed')
+  const completedJobs = jobs.filter(j => j.status === 'completed')
+  const currentUserProfile = profiles.find(p => p.email === user?.email) || null
 
-  const navigateMonth = (direction) => {
-    setCurrentMonth(prev => {
-      const newDate = new Date(prev)
-      newDate.setMonth(newDate.getMonth() + direction)
-      return newDate
-    })
-  }
+  const navItem = (section, icon, label, sub = false) => (
+    <button
+      key={section}
+      className={`sidebar-nav-item${activeSection === section || (section !== 'home' && activeSection.startsWith(section + '/') && !sub) ? ' active' : ''}`}
+      onClick={() => { setActiveSection(section); setMobileSidebarOpen(false) }}
+    >
+      <span className="sidebar-nav-icon">{icon}</span>
+      <span className="sidebar-nav-label">{label}</span>
+    </button>
+  )
 
-  const renderCalendar = () => {
-    const { daysInMonth, startingDayOfWeek, year, month } = getDaysInMonth(currentMonth)
-    const monthNames = ['Ianuarie', 'Februarie', 'Martie', 'Aprilie', 'Mai', 'Iunie', 'Iulie', 'August', 'Septembrie', 'Octombrie', 'Noiembrie', 'Decembrie']
-    const dayNames = ['Dum', 'Lun', 'Mar', 'Mie', 'Joi', 'Vin', 'Sâm']
-    
-    const days = []
-    for (let i = 0; i < startingDayOfWeek; i++) {
-      days.push(<div key={`empty-${i}`} style={{ padding: 8 }}></div>)
-    }
-    
-    for (let day = 1; day <= daysInMonth; day++) {
-      const date = new Date(year, month, day)
-      const hasEvents = hasEventsOnDate(date)
-      const isToday = new Date().toDateString() === date.toDateString()
-      const isSelected = selectedDate && selectedDate.toDateString() === date.toDateString()
-      
-      days.push(
-        <div
-          key={day}
-          onClick={() => setSelectedDate(date)}
-          style={{
-            padding: 16,
-            textAlign: 'center',
-            cursor: 'pointer',
-            backgroundColor: isSelected ? '#2196F3' : isToday ? '#e3f2fd' : hasEvents ? '#fff3e0' : 'transparent',
-            color: isSelected ? 'white' : isToday ? '#1976d2' : 'black',
-            fontWeight: isToday || hasEvents ? 'bold' : 'normal',
-            fontSize: 16,
-            borderRadius: 8,
-            position: 'relative',
-            border: hasEvents ? '3px solid #ff9800' : isToday ? '3px solid #2196F3' : '1px solid #eee',
-            minHeight: 50,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center'
-          }}
-        >
-          {day}
-          {hasEvents && !isSelected && (
-            <div style={{
-              position: 'absolute',
-              bottom: 4,
-              left: '50%',
-              transform: 'translateX(-50%)',
-              width: 8,
-              height: 8,
-              backgroundColor: '#ff9800',
-              borderRadius: '50%'
-            }}></div>
-          )}
-        </div>
-      )
-    }
-    
+  const renderHome = () => {
+    const displayName = currentUserProfile?.full_name || user?.email || 'Admin'
+    const items = [
+      { section: 'profil', icon: '👤', label: 'Profil', count: tasks.filter(t => { const a = Array.isArray(t.assigned_to) ? t.assigned_to : []; const ae = Array.isArray(t.assigned_to_emails) ? t.assigned_to_emails : []; return a.includes(currentUserProfile?.id) || ae.includes(user?.email) }).length },
+      { section: 'lucrari', icon: '📁', label: 'Toate Lucrările', count: activeJobs.length },
+      { section: 'lucrari/cadastru_sporadic', icon: '📍', label: 'Cadastru Sporadic', count: activeJobs.filter(j => j.category === 'cadastru_sporadic').length },
+      { section: 'lucrari/cadastru_sistematic', icon: '🗺️', label: 'Cadastru Sistematic', count: activeJobs.filter(j => j.category === 'cadastru_sistematic').length },
+      { section: 'lucrari/topografie', icon: '⛰️', label: 'Topografie', count: activeJobs.filter(j => j.category === 'topografie').length },
+      { section: 'lucrari_finalizate', icon: '✅', label: 'Lucrări Finalizate', count: completedJobs.length },
+      { section: 'administrativ', icon: '📋', label: 'Administrativ', count: activeJobs.filter(j => j.category === 'administrativ').length },
+      { section: 'calendar', icon: '📅', label: 'Calendar', count: null },
+      { section: 'raport_lunar', icon: '📊', label: 'Raport Lunar', count: null },
+      { section: 'profil_nou', icon: '➕', label: 'Crează Profil Nou', count: profiles.length },
+    ]
     return (
-      <div style={{
-        position: 'fixed',
-        top: 0,
-        left: 0,
-        right: 0,
-        bottom: 0,
-        backgroundColor: 'rgba(0, 0, 0, 0.5)',
-        display: 'flex',
-        justifyContent: 'center',
-        alignItems: 'center',
-        zIndex: 9999
-      }}>
-        <div style={{
-          backgroundColor: 'white',
-          border: '3px solid #2196F3',
-          borderRadius: 12,
-          padding: 24,
-          boxShadow: '0 8px 32px rgba(0,0,0,0.3)',
-          maxWidth: 600,
-          width: '90%',
-          maxHeight: '90vh',
-          overflow: 'auto'
-        }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
-            <button onClick={() => navigateMonth(-1)} style={{ fontSize: 20, padding: '8px 16px' }}>◀ Prev</button>
-            <h2 style={{ margin: 0, fontSize: 24, color: '#2196F3' }}>{monthNames[month]} {year}</h2>
-            <button onClick={() => navigateMonth(1)} style={{ fontSize: 20, padding: '8px 16px' }}>Next ▶</button>
-          </div>
-          
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 8, marginBottom: 12 }}>
-            {dayNames.map(name => (
-              <div key={name} style={{ textAlign: 'center', fontWeight: 'bold', fontSize: 14, padding: 8, color: '#666' }}>
-                {name}
-              </div>
-            ))}
-          </div>
-          
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 8 }}>
-            {days}
-          </div>
-          
-          {selectedDate && (
-            <div style={{ marginTop: 24, borderTop: '2px solid #ddd', paddingTop: 20 }}>
-              <h3 style={{ margin: '0 0 12px 0', color: '#2196F3', fontSize: 18 }}>
-                📅 {selectedDate.toLocaleDateString('ro-RO', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}
-              </h3>
-              
-              {getJobsForDate(selectedDate).length > 0 && (
-                <div style={{ marginBottom: 16 }}>
-                  <strong style={{ fontSize: 16 }}>📋 Jobs ({getJobsForDate(selectedDate).length}):</strong>
-                  {getJobsForDate(selectedDate).map(job => (
-                    <div key={job.id} style={{ fontSize: 14, marginLeft: 12, padding: 8, backgroundColor: '#f5f5f5', borderRadius: 6, marginTop: 6, border: '1px solid #ddd' }}>
-                      • {job.name} - {job.client_name}
-                    </div>
-                  ))}
-                </div>
-              )}
-              
-              {getTasksForDate(selectedDate).length > 0 && (
-                <div>
-                  <strong style={{ fontSize: 16 }}>✅ Tasks ({getTasksForDate(selectedDate).length}):</strong>
-                  {getTasksForDate(selectedDate).map(task => {
-                    const job = jobs.find(j => j.id === task.job_id)
-                    return (
-                      <div key={task.id} style={{ fontSize: 14, marginLeft: 12, padding: 8, backgroundColor: task.status === 'completed' ? '#e8f5e9' : '#fff3e0', borderRadius: 6, marginTop: 6, border: '1px solid #ddd' }}>
-                        • {task.name} {job && `(${job.name})`} - <strong>{task.status}</strong>
-                      </div>
-                    )
-                  })}
-                </div>
-              )}
-              
-              {getJobsForDate(selectedDate).length === 0 && getTasksForDate(selectedDate).length === 0 && (
-                <p style={{ fontSize: 14, color: '#999', margin: 0, fontStyle: 'italic' }}>Nu sunt evenimente în această zi.</p>
-              )}
+      <div>
+        <p className="home-welcome">Bună ziua, {displayName}!</p>
+        <p className="home-subtitle">Selectează o secțiune pentru a continua.</p>
+        <div className="home-grid">
+          {items.map(item => (
+            <div key={item.section} className="home-card" onClick={() => setActiveSection(item.section)}>
+              <div className="home-card-icon">{item.icon}</div>
+              <div className="home-card-label">{item.label}</div>
+              {item.count !== null && <div className="home-card-count">{item.count} {item.count === 1 ? 'element' : 'elemente'}</div>}
             </div>
-          )}
-          
-          <button 
-            onClick={() => { setShowCalendar(false); setSelectedDate(null) }} 
-            style={{ 
-              marginTop: 24, 
-              width: '100%', 
-              padding: '12px', 
-              fontSize: 16, 
-              backgroundColor: '#f44336', 
-              color: 'white', 
-              border: 'none', 
-              borderRadius: 8, 
-              cursor: 'pointer',
-              fontWeight: 'bold'
-            }}
-          >
-            ❌ Închide Calendar
-          </button>
+          ))}
         </div>
       </div>
     )
   }
 
-  return (
-    <div className="dashboard-container">
-      <div className="dashboard-header" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          <img src="/Sigla.svg" alt="Sigla" style={{ width: 56, height: 56, objectFit: 'contain' }} />
-          <h1>Admin Dashboard</h1>
+  const renderProfil = () => {
+    const myId = currentUserProfile?.id
+    const myEmail = user?.email
+    const myTasks = tasks.filter(t => {
+      const a = Array.isArray(t.assigned_to) ? t.assigned_to : (t.assigned_to ? [t.assigned_to] : [])
+      const ae = Array.isArray(t.assigned_to_emails) ? t.assigned_to_emails : []
+      return a.includes(myId) || ae.includes(myEmail)
+    }).sort((a, b) => {
+      if (a.deadline && b.deadline) return new Date(a.deadline) - new Date(b.deadline)
+      if (a.deadline) return -1; if (b.deadline) return 1; return 0
+    })
+    return (
+      <div>
+        <div className="section-header"><h2 className="section-title">👤 Profil</h2></div>
+        <div className="profile-card">
+          <div className="profile-avatar">{(currentUserProfile?.full_name || user?.email || 'A').charAt(0).toUpperCase()}</div>
+          <div>
+            <div className="profile-name">{currentUserProfile?.full_name || user?.email}</div>
+            <div className="profile-email">{user?.email}</div>
+            <div className="profile-role">{user?.role || 'admin'}</div>
+          </div>
         </div>
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-          <button onClick={() => setShowCalendar(s => !s)} className="btn btn-primary">
-            📅 Calendar
-          </button>
-          <button onClick={async () => {
-          try {
-            const { generateMonthlyReportCsv, downloadCsv } = await import('../utils/generateMonthlyReportCsv')
-            const m = currentMonth.getMonth()
-            const y = currentMonth.getFullYear()
-            const csv = generateMonthlyReportCsv({ tasks, profiles, users, month: m, year: y })
-            const filename = `monthly_report_${y}_${String(m+1).padStart(2,'0')}.csv`
-            downloadCsv(csv, filename)
-          } catch (e) {
-            console.error('Export CSV error', e)
-            setError(e.message || 'Eroare export CSV')
-          }
-        }} className="btn btn-secondary">
-            ⤓ Export CSV lună curentă
-          </button>
-          <button onClick={handleLogout} className="btn btn-outline-danger">
-            🚪 Logout
-          </button>
-        </div>
-        {showCalendar && renderCalendar()}
-      </div>
-
-      <section style={{ marginBottom: 20 }}>
-        <h3>Creare job</h3>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8, flexWrap: 'wrap' }}>
-            <button
-              onClick={() => setShowCreateWithTasks(s => !s)}
-              className="btn btn-primary"
-              style={{
-                padding: '10px 16px',
-                fontSize: '14px',
-                fontWeight: 'bold',
-                whiteSpace: 'nowrap'
-              }}
+        <h3 style={{ marginBottom: 12, color: '#333' }}>Subtaskuri asignate ({myTasks.length})</h3>
+        {myTasks.length === 0 ? <p style={{ color: '#6b7280' }}>Nu ai taskuri asignate momentan.</p> : myTasks.map(task => {
+          const job = jobs.find(j => j.id === task.job_id)
+          const isOverdue = task.deadline && new Date(task.deadline) < new Date() && task.status !== 'completed'
+          return (
+            <div key={task.id} className={`task-item-profil${task.status === 'completed' ? ' completed' : ''}${isOverdue ? ' overdue' : ''}`}
+              onClick={() => job && (setPreviousSection('profil'), setSelectedJobId(job.id), setActiveSection('job_detail'))}
+              style={{ cursor: job ? 'pointer' : 'default' }}
             >
-              {showCreateWithTasks ? '✖️ Închide formular' : '➕ Creează job + taskuri'}
-            </button>
-            <div style={{ fontSize: 14, fontWeight: 'bold', color: profiles.length > 0 ? 'green' : 'red' }}>
-              👥 Profiles: {profiles.length}
+              <div style={{ flex: 1 }}>
+                <div style={{ fontWeight: 600, fontSize: 14 }}>{task.name}</div>
+                {job && <div style={{ fontSize: 12, color: '#1976d2', marginTop: 2 }}>📁 {job.name}</div>}
+                {job?.client_name && <div style={{ fontSize: 12, color: '#555', marginTop: 1 }}>👤 <strong>{job.client_name}</strong></div>}
+                {task.description && <div style={{ fontSize: 12, color: '#777', marginTop: 3 }}>{task.description}</div>}
+              </div>
+              <div style={{ textAlign: 'right', flexShrink: 0 }}>
+                {task.deadline && <div style={{ marginBottom: 2 }}>{dlBadge(task.deadline)}</div>}
+                <div style={{ fontSize: 11, marginTop: 3, padding: '2px 7px', borderRadius: 8, display: 'inline-block', background: task.status === 'completed' ? '#e8f5e9' : task.status === 'stand_by' ? '#e3f2fd' : '#fff3e0', color: task.status === 'completed' ? '#2e7d32' : task.status === 'stand_by' ? '#1565c0' : '#e65100', fontWeight: 600 }}>{task.status === 'completed' ? 'Finalizat' : task.status === 'stand_by' ? 'Stand By' : 'În lucru'}</div>
+              </div>
             </div>
-            <button onClick={fetchProfiles} className="btn btn-secondary" style={{ fontSize: 12, padding: '8px 12px' }}>🔄 Reîmprospătează</button>
-            <button onClick={() => setShowEmployeeManagement(s => !s)} className="btn btn-secondary" style={{ fontSize: 12, padding: '8px 12px', marginLeft: 'auto' }}>
-              👥 {showEmployeeManagement ? 'Ascunde' : 'Gestionează'} Angajați
-            </button>
-            {profiles.length === 0 && (
-              <span style={{ fontSize: 12, color: '#c00', marginLeft: 8 }}>
-                ⚠️ Nu sunt profile!
-              </span>
+          )
+        })}
+      </div>
+    )
+  }
+
+  const dlBadge = (deadline, compact = false) => {
+    if (!deadline) return null
+    const d = new Date(deadline), now = new Date()
+    const days = Math.ceil((d - now) / 86400000)
+    let bg, color, label
+    if (days < 0)       { bg = '#fde8e8'; color = '#c62828'; label = compact ? `Expirat ${Math.abs(days)}z` : `⚠ Expirat acum ${Math.abs(days)} ${Math.abs(days)===1?'zi':'zile'}` }
+    else if (days === 0){ bg = '#fff3e0'; color = '#e65100'; label = compact ? 'Azi!' : '⏰ Scade azi!' }
+    else if (days <= 3) { bg = '#fff3e0'; color = '#e65100'; label = compact ? `${days}z` : `📅 ${d.toLocaleDateString('ro-RO')} (${days} ${days===1?'zi':'zile'})` }
+    else if (days <= 7) { bg = '#fffde7'; color = '#f57f17'; label = compact ? `${days}z` : `📅 ${d.toLocaleDateString('ro-RO')} (${days} zile)` }
+    else                { bg = '#e8f5e9'; color = '#2e7d32'; label = compact ? d.toLocaleDateString('ro-RO') : `📅 ${d.toLocaleDateString('ro-RO')}` }
+    return <span style={{ display:'inline-block', background: bg, color, padding: compact ? '2px 7px' : '3px 9px', borderRadius: 6, fontSize: compact ? 11 : 12, fontWeight: 600, whiteSpace: 'nowrap' }}>{label}</span>
+  }
+
+  const reorderItems = async (type, orderedIds, stateArr, setStateFn) => {
+    const token = localStorage.getItem('access_token')
+    const updates = orderedIds.map((id, i) => ({ id, sort_order: i }))
+    setStateFn(prev => {
+      const map = {}
+      updates.forEach(u => { map[u.id] = u.sort_order })
+      return prev.map(item => map[item.id] != null ? { ...item, sort_order: map[item.id] } : item)
+    })
+    try {
+      await fetch('/api/reorder', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: token ? `Bearer ${token}` : '' },
+        body: JSON.stringify({ type, items: updates })
+      })
+    } catch (err) { console.error('reorder error', err) }
+  }
+
+  const renderJobList = (filteredJobs) => {
+    const sorted = [...filteredJobs].sort((a, b) => {
+      if (a.sort_order != null && b.sort_order != null) return a.sort_order - b.sort_order
+      if (a.sort_order != null) return -1
+      if (b.sort_order != null) return 1
+      return new Date(a.created_at) - new Date(b.created_at)
+    })
+
+    const handleJobDrop = (targetId) => {
+      const sourceId = dragJobRef.current
+      dragJobRef.current = null
+      setDragOverJobId(null)
+      if (!sourceId || sourceId === targetId) return
+      // Reorder across the GLOBAL job list to keep sort_order unique (no cross-category collisions)
+      const globalSorted = [...jobs].sort((a, b) => {
+        if (a.sort_order != null && b.sort_order != null) return a.sort_order - b.sort_order
+        if (a.sort_order != null) return -1
+        if (b.sort_order != null) return 1
+        return new Date(a.created_at) - new Date(b.created_at)
+      })
+      const srcIdx = globalSorted.findIndex(j => j.id === sourceId)
+      const tgtIdx = globalSorted.findIndex(j => j.id === targetId)
+      if (srcIdx === -1 || tgtIdx === -1) return
+      const [moved] = globalSorted.splice(srcIdx, 1)
+      const newTgtIdx = globalSorted.findIndex(j => j.id === targetId)
+      globalSorted.splice(newTgtIdx, 0, moved)
+      reorderItems('jobs', globalSorted.map(j => j.id), jobs, setJobs)
+    }
+
+    return (
+      <div>
+        {sorted.length === 0 && <p style={{ color: '#6b7280', fontSize: 14 }}>Nu sunt lucrări în această categorie.</p>}
+        {sorted.map((job, idx) => {
+          const jobTasks = tasks.filter(t => t.job_id === job.id)
+          const completedCount = jobTasks.filter(t => t.status === 'completed').length
+          const earliestDeadline = jobTasks.filter(t => t.deadline && t.status !== 'completed').sort((a, b) => new Date(a.deadline) - new Date(b.deadline))[0]
+          const isDropTarget = dragOverJobId === job.id
+          return (
+            <div
+              key={job.id}
+              className="job-card"
+              draggable
+              onDragStart={(e) => { e.dataTransfer.effectAllowed = 'move'; dragJobRef.current = job.id }}
+              onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; if (dragOverJobId !== job.id) setDragOverJobId(job.id) }}
+              onDragLeave={() => setDragOverJobId(null)}
+              onDrop={(e) => { e.preventDefault(); handleJobDrop(job.id) }}
+              onDragEnd={() => { dragJobRef.current = null; setDragOverJobId(null) }}
+              onClick={() => { setPreviousSection(activeSection); setSelectedJobId(job.id); setActiveSection('job_detail') }}
+              style={{ marginBottom: 10, padding: '14px 16px', border: `1px solid ${isDropTarget ? '#1976d2' : '#e5e7eb'}`, borderTop: isDropTarget ? '3px solid #1976d2' : undefined, borderRadius: 10, background: job.status === 'completed' ? '#f0fdf4' : 'white', boxShadow: '0 1px 4px rgba(0,0,0,0.06)', cursor: 'grab', display: 'flex', alignItems: 'center', gap: 12 }}
+              onMouseEnter={e => { if (!dragJobRef.current) { e.currentTarget.style.boxShadow = '0 4px 12px rgba(0,0,0,0.12)'; e.currentTarget.style.borderColor = '#93c5fd' } }}
+              onMouseLeave={e => { if (!dragJobRef.current) { e.currentTarget.style.boxShadow = '0 1px 4px rgba(0,0,0,0.06)'; e.currentTarget.style.borderColor = '#e5e7eb' } }}
+            >
+              <span title="Trage pentru a reordona" style={{ cursor: 'grab', color: '#bbb', fontSize: 18, flexShrink: 0, lineHeight: 1, userSelect: 'none' }}>⠿</span>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 4 }}>
+                  <span style={{ fontSize: 15 }}>{idx + 1}. {job.name}</span>
+                  <span style={{ padding: '2px 8px', borderRadius: 5, fontSize: 11, color: 'white', background: job.priority === 'urgent' ? '#f44336' : job.priority === 'repede' ? '#ff9800' : '#607d8b' }}>{job.priority || 'normal'}</span>
+                  {job.order_number && <span style={{ padding: '2px 8px', borderRadius: 5, fontSize: 11, color: 'white', background: '#2196f3' }}>Nr. {job.order_number}</span>}
+                  {job.category && <span style={{ padding: '2px 8px', borderRadius: 5, fontSize: 11, color: '#555', background: '#e3f2fd' }}>{CATEGORY_LABELS[job.category] || job.category}</span>}
+                  <strong style={{ color: '#333', fontSize: 13 }}>— {job.client_name}</strong>
+                </div>
+                <div style={{ fontSize: 12, color: '#555', display: 'flex', gap: 14, flexWrap: 'wrap', alignItems: 'center' }}>
+                  <span>💰 <strong>{job.total_value != null ? parseFloat(job.total_value).toFixed(2) + ' lei' : 'N/A'}</strong></span>
+                  <span style={{ color: '#4caf50' }}>💵 <strong>{job.amount_paid != null ? parseFloat(job.amount_paid).toFixed(2) + ' lei' : '0.00 lei'}</strong></span>
+                  <span style={{ color: '#6b7280' }}>{completedCount}/{jobTasks.length} taskuri</span>
+                  {earliestDeadline && dlBadge(earliestDeadline.deadline)}
+                </div>
+              </div>
+              <span style={{ color: '#9ca3af', fontSize: 20, flexShrink: 0 }}>›</span>
+            </div>
+          )
+        })}
+      </div>
+    )
+  }
+
+  const renderJobDetail = () => {
+    const job = jobs.find(j => j.id === selectedJobId)
+    if (!job) return (
+      <div>
+        <button onClick={() => setActiveSection(previousSection)} style={{ padding: '7px 14px', background: '#374151', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13, marginBottom: 16 }}>← Înapoi</button>
+        <p>Lucrarea nu a fost găsită.</p>
+      </div>
+    )
+    const jobTasks = tasks.filter(t => t.job_id === job.id).sort((a, b) => {
+      if (a.sort_order != null && b.sort_order != null) return a.sort_order - b.sort_order
+      if (a.sort_order != null) return -1
+      if (b.sort_order != null) return 1
+      return new Date(a.created_at) - new Date(b.created_at)
+    })
+
+    const handleTaskDrop = (targetId) => {
+      const sourceId = dragTaskRef.current
+      dragTaskRef.current = null
+      setDragOverTaskId(null)
+      if (!sourceId || sourceId === targetId) return
+      const srcIdx = jobTasks.findIndex(t => t.id === sourceId)
+      const tgtIdx = jobTasks.findIndex(t => t.id === targetId)
+      if (srcIdx === -1 || tgtIdx === -1) return
+      const reordered = [...jobTasks]
+      const [moved] = reordered.splice(srcIdx, 1)
+      reordered.splice(tgtIdx, 0, moved)
+      reorderItems('tasks', reordered.map(t => t.id), tasks, setTasks)
+    }
+
+    const isEditing = editingJobId === job.id
+    return (
+      <div>
+        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, marginBottom: 20, flexWrap: 'wrap' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+            <button onClick={() => { setEditingJobId(null); setJobEdits({}); setActiveSection(previousSection) }} style={{ padding: '7px 14px', background: '#374151', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13, fontWeight: 600 }}>← Înapoi</button>
+            <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700, color: '#1a1a2e' }}>{job.name}</h2>
+            <span style={{ padding: '2px 8px', borderRadius: 5, fontSize: 11, color: 'white', background: job.priority === 'urgent' ? '#f44336' : job.priority === 'repede' ? '#ff9800' : '#607d8b' }}>{job.priority || 'normal'}</span>
+            {job.status === 'completed' && <span style={{ padding: '3px 8px', borderRadius: 5, fontSize: 11, color: 'white', background: '#4caf50' }}>Finalizat</span>}
+          </div>
+          <div style={{ display: 'flex', gap: 6 }}>
+            <button onClick={() => downloadPdfForJob(job)} style={{ padding: '7px 14px', background: '#e65100', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13, fontWeight: 600 }}>📄 PDF</button>
+            <button onClick={() => duplicateJob(job)} style={{ padding: '7px 14px', background: '#7b1fa2', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13, fontWeight: 600 }}>📋 Duplică</button>
+            <button onClick={() => deleteJob(job.id)} style={{ padding: '7px 14px', background: '#c62828', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13, fontWeight: 600 }}>🗑️ Șterge</button>
+          </div>
+        </div>
+
+        <div style={{ background: 'white', borderRadius: 10, padding: 18, border: '1px solid #e5e7eb', marginBottom: 16, boxShadow: '0 1px 4px rgba(0,0,0,0.06)' }}>
+          {isEditing ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                <select value={jobEdits.nameType || 'Altele'} onChange={e => setJobEdits(p => ({ ...p, nameType: e.target.value }))} style={{ flex: '1 1 200px', padding: '7px 10px', borderRadius: 6, border: '1px solid #ccc' }}>
+                  {JOB_NAME_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
+                </select>
+                <select value={jobEdits.priority || 'normal'} onChange={e => setJobEdits(p => ({ ...p, priority: e.target.value }))} style={{ padding: '7px 10px', borderRadius: 6, border: '1px solid #ccc' }}>
+                  <option value="normal">Normal</option><option value="repede">Repede</option><option value="urgent">Urgent</option>
+                </select>
+                <select value={jobEdits.category || ''} onChange={e => setJobEdits(p => ({ ...p, category: e.target.value }))} style={{ padding: '7px 10px', borderRadius: 6, border: '1px solid #ccc' }}>
+                  <option value="">Fără categorie</option>
+                  <option value="cadastru_sporadic">Cadastru Sporadic</option>
+                  <option value="cadastru_sistematic">Cadastru Sistematic</option>
+                  <option value="topografie">Topografie</option>
+                  <option value="administrativ">Administrativ</option>
+                </select>
+              </div>
+              {jobEdits.nameType === 'Altele' && (
+                <input placeholder="Descrie tipul lucrării *" value={jobEdits.nameCustom || ''} onChange={e => setJobEdits(p => ({ ...p, nameCustom: e.target.value }))} style={{ padding: '7px 10px', borderRadius: 6, border: '1px solid #f59e0b', background: '#fffbeb' }} />
+              )}
+              <input placeholder="Nume Client" value={jobEdits.client_name || ''} onChange={e => setJobEdits(p => ({ ...p, client_name: e.target.value }))} style={{ padding: '7px 10px', borderRadius: 6, border: '1px solid #ccc' }} />
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                <input placeholder="Serie buletin" value={jobEdits.client_id_series || ''} onChange={e => setJobEdits(p => ({ ...p, client_id_series: e.target.value }))} style={{ flex: '1 1 120px', padding: '7px 10px', borderRadius: 6, border: '1px solid #ccc' }} />
+                <input placeholder="CNP" value={jobEdits.client_cnp || ''} onChange={e => setJobEdits(p => ({ ...p, client_cnp: e.target.value }))} style={{ flex: '1 1 120px', padding: '7px 10px', borderRadius: 6, border: '1px solid #ccc' }} />
+                <input placeholder="Adresa" value={jobEdits.client_address || ''} onChange={e => setJobEdits(p => ({ ...p, client_address: e.target.value }))} style={{ flex: '2 1 200px', padding: '7px 10px', borderRadius: 6, border: '1px solid #ccc' }} />
+              </div>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                <input type="email" placeholder="Email Client" value={jobEdits.client_email || ''} onChange={e => setJobEdits(p => ({ ...p, client_email: e.target.value }))} style={{ flex: '1 1 180px', padding: '7px 10px', borderRadius: 6, border: '1px solid #ccc' }} />
+                <input placeholder="Telefon Client" value={jobEdits.client_phone || ''} onChange={e => setJobEdits(p => ({ ...p, client_phone: e.target.value }))} style={{ flex: '1 1 140px', padding: '7px 10px', borderRadius: 6, border: '1px solid #ccc' }} />
+              </div>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                <label style={{ fontSize: 12 }}>Bani încasați:</label>
+                <input type="number" step="0.01" value={jobEdits.amount_paid ?? ''} onChange={e => setJobEdits(p => ({ ...p, amount_paid: e.target.value }))} style={{ width: 120, padding: '7px 10px', borderRadius: 6, border: '1px solid #ccc' }} />
+                <label style={{ fontSize: 12 }}>Nr. ordine:</label>
+                <input type="number" min="1" value={jobEdits.order_number ?? ''} onChange={e => setJobEdits(p => ({ ...p, order_number: e.target.value }))} style={{ width: 100, padding: '7px 10px', borderRadius: 6, border: '1px solid #ccc' }} />
+                <select value={jobEdits.status || 'todo'} onChange={e => setJobEdits(p => ({ ...p, status: e.target.value }))} style={{ padding: '7px 10px', borderRadius: 6, border: '1px solid #ccc' }}>
+                  <option value="todo">În lucru</option><option value="completed">Finalizat</option>
+                </select>
+              </div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button onClick={() => saveJobAndTasks(job.id)} style={{ padding: '7px 14px', background: '#4caf50', color: 'white', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13 }}>💾 Salvează tot</button>
+                <button onClick={cancelEditJob} style={{ padding: '7px 14px', background: '#999', color: 'white', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13 }}>Anulează</button>
+              </div>
+            </div>
+          ) : (
+            <div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 12, marginBottom: 12 }}>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                  {job.order_number && <span style={{ padding: '2px 8px', borderRadius: 5, fontSize: 11, color: 'white', background: '#2196f3' }}>Nr. {job.order_number}</span>}
+                  {job.category && <span style={{ padding: '2px 8px', borderRadius: 5, fontSize: 11, color: '#555', background: '#e3f2fd' }}>{CATEGORY_LABELS[job.category] || job.category}</span>}
+                </div>
+                <button onClick={() => startEditJob(job)} style={{ padding: '7px 14px', background: '#1976d2', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13, fontWeight: 600 }}>✏️ Editează</button>
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 12, fontSize: 13 }}>
+                <div><div style={{ color: '#888', fontSize: 11, marginBottom: 2 }}>Client</div><div style={{ fontWeight: 600 }}>{job.client_name || 'N/A'}</div></div>
+                <div><div style={{ color: '#888', fontSize: 11, marginBottom: 2 }}>Email</div><div>{job.client_email || 'N/A'}</div></div>
+                <div><div style={{ color: '#888', fontSize: 11, marginBottom: 2 }}>Telefon</div><div>{job.client_phone || 'N/A'}</div></div>
+                <div><div style={{ color: '#888', fontSize: 11, marginBottom: 2 }}>CNP</div><div>{job.client_cnp || 'N/A'}</div></div>
+                <div><div style={{ color: '#888', fontSize: 11, marginBottom: 2 }}>Serie buletin</div><div>{job.client_id_series || 'N/A'}</div></div>
+                <div><div style={{ color: '#888', fontSize: 11, marginBottom: 2 }}>Adresă</div><div>{job.client_address || 'N/A'}</div></div>
+                <div><div style={{ color: '#888', fontSize: 11, marginBottom: 2 }}>Valoare totală</div><div style={{ fontWeight: 700, color: '#1976d2', fontSize: 15 }}>{job.total_value != null ? parseFloat(job.total_value).toFixed(2) + ' lei' : 'N/A'}</div></div>
+                <div>
+                  <div style={{ color: '#888', fontSize: 11, marginBottom: 2 }}>Bani încasați</div>
+                  <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                    <input type="number" step="0.01" min="0" value={amountPaidDraft[job.id] !== undefined ? amountPaidDraft[job.id] : (job.amount_paid ?? '')} onChange={e => handleAmountPaidChange(job.id, e.target.value)} style={{ width: 110, padding: '5px 7px', borderRadius: 5, border: '1px solid #ccc', fontSize: 13 }} />
+                    <button onClick={() => saveAmountPaid(job.id)} style={{ padding: '5px 10px', background: '#4caf50', color: 'white', border: 'none', borderRadius: 5, cursor: 'pointer', fontSize: 12 }}>💾</button>
+                  </div>
+                </div>
+                <div><div style={{ color: '#888', fontSize: 11, marginBottom: 2 }}>Creat la</div><div>{new Date(job.created_at).toLocaleString('ro-RO')}</div></div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div style={{ background: 'white', borderRadius: 10, padding: 18, border: '1px solid #e5e7eb', boxShadow: '0 1px 4px rgba(0,0,0,0.06)' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+            <h3 style={{ margin: 0, fontSize: 15, color: '#1a1a2e' }}>Taskuri ({jobTasks.length})</h3>
+            {addingTaskToJob !== job.id && (
+              <button onClick={() => startAddTaskToJob(job.id)} style={{ padding: '6px 14px', background: '#e8f5e9', border: '1px solid #c8e6c9', borderRadius: 6, cursor: 'pointer', fontSize: 12, color: '#2e7d32', fontWeight: 600 }}>➕ Adaugă task</button>
             )}
           </div>
-
-          {showEmployeeManagement && (
-            <div style={{
-              marginTop: 16,
-              padding: 16,
-              border: '2px solid #4CAF50',
-              borderRadius: 8,
-              backgroundColor: '#f0f8f0'
-            }}>
-              <h3 style={{ marginTop: 0 }}>👥 Gestionare Angajați</h3>
-              {profiles.length === 0 ? (
-                <p style={{ color: '#c00' }}>Nu sunt angajați în baza de date.</p>
-              ) : (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-                  {profiles.map(profile => (
-                    <div key={profile.id} style={{
-                      padding: 12,
-                      border: '1px solid #ddd',
-                      borderRadius: 6,
-                      backgroundColor: 'white'
-                    }}>
-                      {editingProfileId === profile.id ? (
-                        // Mod editare
-                        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-                          <input
-                            type="email"
-                            placeholder="Email"
-                            value={profileEdits.email || ''}
-                            onChange={e => setProfileEdits(prev => ({ ...prev, email: e.target.value }))}
-                            style={{ flex: '1 1 200px', padding: 4 }}
-                          />
-                          <input
-                            placeholder="Nume Complet"
-                            value={profileEdits.full_name || ''}
-                            onChange={e => setProfileEdits(prev => ({ ...prev, full_name: e.target.value }))}
-                            style={{ flex: '1 1 200px', padding: 4 }}
-                          />
-                          <select
-                            value={profileEdits.role || 'employee'}
-                            onChange={e => setProfileEdits(prev => ({ ...prev, role: e.target.value }))}
-                            style={{ padding: 4 }}
-                          >
-                            <option value="employee">Employee</option>
-                            <option value="ceo">CEO</option>
-                            <option value="admin">Admin</option>
-                          </select>
-                          <button onClick={() => saveProfile(profile.id)} style={{ fontSize: 12, backgroundColor: '#4CAF50', color: 'white' }}>
-                            💾 Salvează
-                          </button>
-                          <button onClick={cancelEditProfile} style={{ fontSize: 12, backgroundColor: '#999', color: 'white' }}>
-                            ❌ Anulează
-                          </button>
-                        </div>
-                      ) : (
-                        // Mod afișare
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                          <div>
-                            <div style={{ fontWeight: 'bold', fontSize: 14 }}>{profile.full_name || '(Fără nume)'}</div>
-                            <div style={{ fontSize: 12, color: '#666' }}>{profile.email}</div>
-                            <div style={{ fontSize: 11, color: '#999' }}>
-                              Rol: <span style={{ fontWeight: 'bold' }}>{profile.role}</span>
-                            </div>
-                          </div>
-                          <div style={{ display: 'flex', gap: 8 }}>
-                            <button onClick={() => startEditProfile(profile)} style={{ fontSize: 12, backgroundColor: '#2196F3', color: 'white' }}>
-                              ✏️ Editează
-                            </button>
-                            <button onClick={() => deleteProfile(profile.id)} style={{ fontSize: 12, backgroundColor: '#f44336', color: 'white' }}>
-                              🗑️ Șterge
-                            </button>
-                          </div>
+          {jobTasks.map(task => {
+            const assignedProfiles = (profiles || []).filter(p => Array.isArray(task.assigned_to) ? task.assigned_to.includes(p.id) : task.assigned_to === p.id)
+            const isTaskExpanded = expandedTask === task.id
+            if (isEditing) {
+              const draft = taskDrafts[task.id] || { name: task.name, description: task.description || '', status: task.status, assigned_to: Array.isArray(task.assigned_to) ? task.assigned_to : [], value: task.value || '', deadline: task.deadline || '' }
+              const setDraft = (upd) => setTaskDrafts(prev => ({ ...prev, [task.id]: { ...draft, ...upd } }))
+              return (
+                <div key={task.id} className="task-row" style={{ marginBottom: 8, padding: '10px 12px', border: '1px solid #90caf9', borderRadius: 7, background: '#f0f7ff' }}>
+                  <input placeholder="Nume Task" value={draft.name} onChange={e => setDraft({ name: e.target.value })} style={{ marginBottom: 5, width: '100%', padding: '6px 9px', borderRadius: 5, border: '1px solid #ccc', boxSizing: 'border-box' }} />
+                  <textarea placeholder="Descriere" value={draft.description} onChange={e => setDraft({ description: e.target.value })} style={{ marginBottom: 5, width: '100%', minHeight: 50, padding: '6px 9px', borderRadius: 5, border: '1px solid #ccc', boxSizing: 'border-box' }} />
+                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 6 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}><label style={{ fontSize: 12 }}>Deadline:</label><input type="datetime-local" value={draft.deadline ? draft.deadline.slice(0, 16) : ''} onChange={e => setDraft({ deadline: e.target.value })} style={{ padding: 5 }} /></div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}><label style={{ fontSize: 12 }}>Valoare (lei):</label><input type="number" value={draft.value} onChange={e => setDraft({ value: e.target.value })} style={{ width: 100, padding: 5 }} step="0.01" min="0" /></div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}><label style={{ fontSize: 12 }}>Status:</label><select value={draft.status} onChange={e => setDraft({ status: e.target.value })} style={{ padding: '4px 8px', borderRadius: 5, border: '1px solid #ccc' }}><option value="todo">În lucru</option><option value="stand_by">Stand By</option><option value="completed">Finalizat</option></select></div>
+                  </div>
+                  <MultiAssignSelector profiles={profiles} selectedIds={draft.assigned_to || []} onChange={v => setDraft({ assigned_to: v })} />
+                  <div style={{ marginTop: 6, display: 'flex', justifyContent: 'flex-end' }}>
+                    <button onClick={() => deleteTask(task.id)} style={{ fontSize: 11, padding: '4px 10px', background: '#ffebee', border: '1px solid #ffcdd2', borderRadius: 5, cursor: 'pointer', color: '#c62828' }}>🗑️ Șterge task</button>
+                  </div>
+                </div>
+              )
+            }
+            const isDropTarget = dragOverTaskId === task.id
+            return (
+              <div
+                key={task.id}
+                className="task-row"
+                draggable={!isEditing}
+                onDragStart={(e) => { e.dataTransfer.effectAllowed = 'move'; dragTaskRef.current = task.id }}
+                onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; if (dragOverTaskId !== task.id) setDragOverTaskId(task.id) }}
+                onDragLeave={() => setDragOverTaskId(null)}
+                onDrop={(e) => { e.preventDefault(); handleTaskDrop(task.id) }}
+                onDragEnd={() => { dragTaskRef.current = null; setDragOverTaskId(null) }}
+                style={{ marginBottom: 8, padding: '10px 12px', border: `1px solid ${isDropTarget ? '#1976d2' : '#e5e7eb'}`, borderTop: isDropTarget ? '3px solid #1976d2' : undefined, borderRadius: 7, background: task.status === 'completed' ? '#f0fdf4' : 'white', cursor: isEditing ? 'default' : 'grab' }}
+              >
+                <div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8, flexWrap: 'wrap' }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                        {!isEditing && <span title="Trage pentru a reordona" style={{ color: '#ccc', fontSize: 16, cursor: 'grab', userSelect: 'none', lineHeight: 1 }}>⠿</span>}
+                        <strong style={{ fontSize: 14 }}>{task.name}</strong>
+                        <span style={{ fontSize: 11, padding: '2px 6px', borderRadius: 4, background: task.status === 'completed' ? '#e8f5e9' : task.status === 'stand_by' ? '#e3f2fd' : '#fff3e0', color: task.status === 'completed' ? '#2e7d32' : task.status === 'stand_by' ? '#1565c0' : '#e65100', fontWeight: 600 }}>{task.status === 'completed' ? 'Finalizat' : task.status === 'stand_by' ? 'Stand By' : 'În lucru'}</span>
+                      </div>
+                      <div style={{ fontSize: 12, color: '#666', marginTop: 4 }}>
+                        <span>Asignat: {assignedProfiles.length > 0 ? assignedProfiles.map(p => displayUserLabel(p)).join(', ') : '(Neasignat)'}</span>
+                        {task.value != null && <span> | 💰 {parseFloat(task.value).toFixed(2)} lei</span>}
+                        {task.deadline && <span style={{ marginLeft: 6 }}>{dlBadge(task.deadline, true)}</span>}
+                      </div>
+                      {task.description && <div style={{ fontSize: 12, color: '#777', marginTop: 4 }}>{task.description}</div>}
+                      {isTaskExpanded && (
+                        <div style={{ marginTop: 8, fontSize: 12, color: '#555', paddingTop: 8, borderTop: '1px solid #eee' }}>
+                          {(Array.isArray(task.completers) && task.completers.length > 0) && <div style={{ marginBottom: 4 }}>Finalizat de: {task.completers.map((c, i) => { const p = (profiles || []).find(p => p.id === c.id || (c.email && p.email && p.email.toLowerCase() === c.email.toLowerCase())); const l = p ? displayUserLabel(p) : (c.email || c.id); return `${l}${c.amount != null ? ` (${c.amount} lei)` : ''}${i < task.completers.length - 1 ? ', ' : ''}` }).join('')}</div>}
+                          {task.completed_at && <div>Finalizat la: {new Date(task.completed_at).toLocaleString('ro-RO')}</div>}
+                          <div style={{ marginTop: 4 }}>Creat la: {new Date(task.created_at).toLocaleString('ro-RO')}</div>
+                          {task.deadline && <div style={{ marginTop: 4 }}>Deadline: {new Date(task.deadline).toLocaleString('ro-RO')}</div>}
                         </div>
                       )}
                     </div>
-                  ))}
-                </div>
-              )}
-
-              {/* Secțiune creare profil nou */}
-              <div style={{
-                marginTop: 20,
-                padding: 12,
-                border: '2px dashed #2196F3',
-                borderRadius: 8,
-                backgroundColor: '#f0f8ff'
-              }}>
-                <button 
-                  onClick={() => setShowCreateProfile(s => !s)}
-                  style={{
-                    fontSize: 14,
-                    fontWeight: 'bold',
-                    backgroundColor: '#2196F3',
-                    color: 'white',
-                    padding: '8px 16px',
-                    border: 'none',
-                    borderRadius: 4,
-                    cursor: 'pointer',
-                    marginBottom: showCreateProfile ? 12 : 0
-                  }}
-                >
-                  ➕ {showCreateProfile ? 'Ascunde Formular' : 'Creează Profil Nou'}
-                </button>
-
-                {showCreateProfile && (
-                  <form onSubmit={handleCreateNewProfile} style={{
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: 10
-                  }}>
-                    <input
-                      type="email"
-                      placeholder="Email"
-                      value={newProfileData.email}
-                      onChange={e => setNewProfileData(prev => ({ ...prev, email: e.target.value }))}
-                      required
-                      style={{ padding: '8px', borderRadius: 4, border: '1px solid #ccc' }}
-                    />
-                    <input
-                      type="text"
-                      placeholder="Nume Complet"
-                      value={newProfileData.full_name}
-                      onChange={e => setNewProfileData(prev => ({ ...prev, full_name: e.target.value }))}
-                      required
-                      style={{ padding: '8px', borderRadius: 4, border: '1px solid #ccc' }}
-                    />
-                    <input
-                      type="password"
-                      placeholder="Parolă (min 6 caractere)"
-                      value={newProfileData.password}
-                      onChange={e => setNewProfileData(prev => ({ ...prev, password: e.target.value }))}
-                      required
-                      style={{ padding: '8px', borderRadius: 4, border: '1px solid #ccc' }}
-                    />
-                    <input
-                      type="password"
-                      placeholder="Confirmă Parola"
-                      value={newProfileData.confirmPassword}
-                      onChange={e => setNewProfileData(prev => ({ ...prev, confirmPassword: e.target.value }))}
-                      required
-                      style={{ padding: '8px', borderRadius: 4, border: '1px solid #ccc' }}
-                    />
-                    <select
-                      value={newProfileData.role}
-                      onChange={e => setNewProfileData(prev => ({ ...prev, role: e.target.value }))}
-                      style={{ padding: '8px', borderRadius: 4, border: '1px solid #ccc' }}
-                    >
-                      <option value="employee">Employee</option>
-                      <option value="ceo">CEO</option>
-                      <option value="admin">Admin</option>
-                    </select>
-                    <div style={{ display: 'flex', gap: 8 }}>
-                      <button 
-                        type="submit" 
-                        disabled={loading}
-                        style={{
-                          backgroundColor: '#4CAF50',
-                          color: 'white',
-                          padding: '8px 16px',
-                          border: 'none',
-                          borderRadius: 4,
-                          cursor: loading ? 'not-allowed' : 'pointer',
-                          opacity: loading ? 0.6 : 1
-                        }}
-                      >
-                        ✅ Creează Profil
-                      </button>
-                      <button 
-                        type="button"
-                        onClick={() => setShowCreateProfile(false)}
-                        style={{
-                          backgroundColor: '#999',
-                          color: 'white',
-                          padding: '8px 16px',
-                          border: 'none',
-                          borderRadius: 4,
-                          cursor: 'pointer'
-                        }}
-                      >
-                        ❌ Anulează
-                      </button>
-                    </div>
-                  </form>
-                )}
-              </div>
-            </div>
-          )}
-
-          {showCreateWithTasks && (
-            <form onSubmit={handleCreateJob}>
-              <div>
-                <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                  <input placeholder="Job Name" value={jobname} onChange={e => setJobname(e.target.value)} required />
-                  <select value={jobPriority} onChange={e => setJobPriority(e.target.value)} style={{ padding: 6, width: 140, minWidth: 120 }}>
-                    <option value="normal">Normal</option>
-                    <option value="repede">Repede</option>
-                    <option value="urgent">Urgent</option>
-                  </select>
-                </div>
-                <input placeholder="Client Name (full)" value={clientname} onChange={e => setClientname(e.target.value)} />
-                {/* removed separate first/last name inputs; use single Client Name field */}
-                <input placeholder="Serie buletin" value={clientIdSeries} onChange={e => setClientIdSeries(e.target.value)} style={{ marginTop: 6 }} />
-                <input placeholder="CNP" value={clientCNP} onChange={e => setClientCNP(e.target.value)} style={{ marginTop: 6 }} />
-                <input placeholder="Adresa" value={clientAddress} onChange={e => setClientAddress(e.target.value)} style={{ marginTop: 6 }} />
-                <input type="email" placeholder="Client Email" value={clientemail} onChange={e => setClientemail(e.target.value)} />
-                <div style={{ display: 'flex', gap: 8, marginTop: 6, alignItems: 'center' }}>
-                  <label style={{ fontSize: 12 }}>Telefon Client (opțional):</label>
-                  <input placeholder="Telefon" value={clientPhone} onChange={e => setClientPhone(e.target.value)} style={{ width: 160, padding: 6 }} />
-                </div>
-                <div style={{ display: 'flex', gap: 8, marginTop: 6, alignItems: 'center' }}>
-                  <label style={{ fontSize: 12 }}>Valoare Job (opțional):</label>
-                  <input type="number" step="0.01" placeholder="Valoare totală" value={jobValue} onChange={e => setJobValue(e.target.value)} style={{ width: 160, padding: 6 }} />
-                </div>
-                <div style={{ display: 'flex', gap: 8, marginTop: 6, alignItems: 'center' }}>
-                  <label style={{ fontSize: 12 }}>Număr de ordine (opțional):</label>
-                  <input type="number" min="1" placeholder="Nr ordine" value={jobOrderNumber} onChange={e => setJobOrderNumber(e.target.value)} style={{ width: 140, padding: 6 }} />
-                </div>
-              </div>
-
-              <div style={{ marginTop: 8, borderTop: '1px dashed #ddd', paddingTop: 8 }}>
-                <h4>Taskuri pentru job</h4>
-                {newJobTasks.map((t, i) => (
-                  <div key={i} style={{ marginBottom: 8, display: 'flex', gap: 8, alignItems: 'flex-start', flexWrap: 'wrap', border: '1px solid #eee', padding: 8, borderRadius: 6, background: 'white' }}>
-                    <div style={{ flex: '1 1 320px', minWidth: 260 }}>
-                      <input placeholder="Nume task" value={t.name} onChange={e => updateNewJobTaskField(i, 'name', e.target.value)} required style={{ width: '100%', marginBottom: 6, padding: 8 }} />
-                      <textarea placeholder="Descriere" value={t.description || ''} onChange={e => updateNewJobTaskField(i, 'description', e.target.value)} style={{ width: '100%', marginBottom: 6, minHeight: 80, padding: 8 }} />
-                    </div>
-
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8, minWidth: 140 }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                        <label style={{ fontSize: 12 }}>Ore:</label>
-                        <input type="number" placeholder="Ore" value={t.estimated_hours} onChange={e => updateNewJobTaskField(i, 'estimated_hours', e.target.value)} style={{ width: 96, padding: 6 }} step="0.5" min="0" />
-                      </div>
-                                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                                      <label style={{ fontSize: 12 }}>Termen (deadline):</label>
-                                      <input type="datetime-local" value={t.deadline ? t.deadline.slice(0,16) : ''} onChange={e => updateNewJobTaskField(i, 'deadline', e.target.value)} style={{ padding: 6 }} />
-                                    </div>
-                      {/* Admin: task value input removed on purpose */}
-                    </div>
-
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8, minWidth: 200 }}>
-                      <MultiAssignSelector profiles={profiles} selectedIds={t.assigned_to || []} onChange={v => updateNewJobTaskField(i, 'assigned_to', v)} />
-                      <button type="button" onClick={() => removeNewJobTask(i)} style={{ fontSize: 12, color: 'red' }}>Șterge Task</button>
+                    <div style={{ display: 'flex', gap: 5, alignItems: 'center', flexShrink: 0 }}>
+                      <button onClick={() => setExpandedTask(isTaskExpanded ? null : task.id)} style={{ fontSize: 11, padding: '4px 8px', background: '#f3f4f6', border: '1px solid #e5e7eb', borderRadius: 5, cursor: 'pointer', color: '#374151' }}>{isTaskExpanded ? '▲' : '▼'}</button>
+                      <button onClick={() => toggleComplete(task)} style={{ fontSize: 11, padding: '4px 8px', background: task.status === 'completed' ? '#fff3e0' : '#e8f5e9', border: '1px solid ' + (task.status === 'completed' ? '#ffcc80' : '#c8e6c9'), borderRadius: 5, cursor: 'pointer', color: task.status === 'completed' ? '#e65100' : '#2e7d32' }}>{task.status === 'completed' ? '↩️ Undo' : task.status === 'stand_by' ? '▶ Reia' : '✅ Done'}</button>
+                      <button onClick={() => deleteTask(task.id)} style={{ fontSize: 11, padding: '4px 8px', background: '#ffebee', border: '1px solid #ffcdd2', borderRadius: 5, cursor: 'pointer', color: '#c62828' }}>🗑️</button>
                     </div>
                   </div>
-                ))}
-                <button type="button" onClick={addNewJobTask} style={{ fontSize: 12 }}>+ Adaugă task</button>
+                </div>
               </div>
-
-              <div style={{ marginTop: 8 }}>
-                <button type="submit">Creează Job</button>
+            )
+          })}
+          {addingTaskToJob === job.id ? (
+            <form onSubmit={handleAddTask} style={{ marginTop: 12, padding: 14, background: '#e3f2fd', borderRadius: 7, border: '2px solid #90caf9' }}>
+              <input placeholder="Nume task" value={newTaskData.name} onChange={e => setNewTaskData(p => ({ ...p, name: e.target.value }))} required style={{ width: '100%', marginBottom: 6, padding: '7px 9px', borderRadius: 5, border: '1px solid #ccc' }} />
+              <textarea placeholder="Descriere" value={newTaskData.description || ''} onChange={e => setNewTaskData(p => ({ ...p, description: e.target.value }))} style={{ width: '100%', marginBottom: 6, minHeight: 60, padding: '7px 9px', borderRadius: 5, border: '1px solid #ccc' }} />
+              <div style={{ display: 'flex', gap: 10, marginBottom: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                    <label style={{ fontSize: 12 }}>Deadline:</label>
+                    {!newTaskData.noDeadline && <input type="datetime-local" value={newTaskData.deadline || ''} onChange={e => setNewTaskData(p => ({ ...p, deadline: e.target.value }))} required style={{ padding: 5 }} />}
+                  </div>
+                  <label style={{ fontSize: 11, color: '#666', display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer' }}>
+                    <input type="checkbox" checked={!!newTaskData.noDeadline} onChange={e => setNewTaskData(p => ({ ...p, noDeadline: e.target.checked, deadline: e.target.checked ? '' : p.deadline }))} />
+                    Fără termen
+                  </label>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}><label style={{ fontSize: 12 }}>Valoare (lei):</label><input type="number" value={newTaskData.value} onChange={e => setNewTaskData(p => ({ ...p, value: e.target.value }))} style={{ width: 100, padding: 5 }} step="0.01" min="0" /></div>
+                <MultiAssignSelector profiles={profiles} selectedIds={newTaskData.assigned_to || []} onChange={v => setNewTaskData(p => ({ ...p, assigned_to: v }))} />
+              </div>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <button type="submit" style={{ padding: '6px 12px', background: '#4caf50', color: 'white', border: 'none', borderRadius: 5, cursor: 'pointer', fontSize: 12 }}>➕ Adaugă</button>
+                <button type="button" onClick={cancelAddTask} style={{ padding: '6px 12px', background: '#999', color: 'white', border: 'none', borderRadius: 5, cursor: 'pointer', fontSize: 12 }}>Anulează</button>
               </div>
             </form>
+          ) : (
+            jobTasks.length === 0 && <p style={{ fontSize: 13, color: '#6b7280', marginTop: 8 }}>Nu sunt taskuri. Adaugă primul task.</p>
           )}
         </div>
-      </section>
+      </div>
+    )
+  }
 
-      {loading && <p>Loading...</p>}
-      {error && <p style={{ color: 'red' }}>Error: {error}</p>}
-      {message && <p style={{ color: 'green' }}>{message}</p>}
+  const renderSection = (filteredJobs, title, icon, defaultCat = '') => {
+    const q = searchQuery.trim().toLowerCase()
+    const displayed = q ? filteredJobs.filter(j => (j.client_name || '').toLowerCase().includes(q) || (j.name || '').toLowerCase().includes(q)) : filteredJobs
+    return (
+      <div>
+        <div className="section-header">
+          <h2 className="section-title">{icon} {title} <span style={{ fontSize: 14, fontWeight: 400, color: '#777' }}>({displayed.length})</span></h2>
+          <button onClick={() => { setJobCategory(defaultCat); setShowCreateWithTasks(true) }} style={{ padding: '9px 18px', background: '#16213e', color: 'white', border: 'none', borderRadius: 7, cursor: 'pointer', fontSize: 13, fontWeight: 600 }}>+ Crează Lucrare</button>
+        </div>
+        <div style={{ marginBottom: 12 }}>
+          <input value={searchQuery} onChange={e => setSearchQuery(e.target.value)} placeholder="🔍 Caută după beneficiar sau tipul lucrării..." style={{ width: '100%', padding: '9px 13px', borderRadius: 8, border: '1px solid #d1d5db', fontSize: 13, boxSizing: 'border-box' }} />
+        </div>
+        {renderJobList(displayed)}
+      </div>
+    )
+  }
 
-      <section>
-        <h3>Joburi ({jobs.length})</h3>
-        {jobs.map((job, idx) => {
-          const jobTasks = tasks.filter(t => t.job_id === job.id).sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
-          const totalHours = jobTasks.reduce((sum, t) => sum + (parseFloat(t.estimated_hours) || 0), 0)
-          const isExpanded = expandedJob === job.id
-          const isEditing = editingJobId === job.id
+  const renderCalendar = () => {
+    const { daysInMonth, startingDayOfWeek, year, month } = getDaysInMonth(currentMonth)
+    const monthNames = ['Ianuarie','Februarie','Martie','Aprilie','Mai','Iunie','Iulie','August','Septembrie','Octombrie','Noiembrie','Decembrie']
+    const dayNames = ['Dum','Lun','Mar','Mie','Joi','Vin','Sâm']
+    const days = []
+    for (let i = 0; i < startingDayOfWeek; i++) days.push(<div key={`e-${i}`} style={{ padding: 8 }} />)
+    for (let day = 1; day <= daysInMonth; day++) {
+      const date = new Date(year, month, day)
+      const hasEvents = hasEventsOnDate(date)
+      const isToday = new Date().toDateString() === date.toDateString()
+      const isSelected = selectedDate && selectedDate.toDateString() === date.toDateString()
+      days.push(
+        <div key={day} onClick={() => setSelectedDate(date)} style={{ padding: 12, textAlign: 'center', cursor: 'pointer', background: isSelected ? '#2196f3' : isToday ? '#e3f2fd' : hasEvents ? '#fff3e0' : 'transparent', color: isSelected ? 'white' : isToday ? '#1565c0' : 'black', fontWeight: isToday || hasEvents ? 700 : 400, borderRadius: 7, border: hasEvents ? '2px solid #ff9800' : isToday ? '2px solid #2196f3' : '1px solid #eee', position: 'relative', minHeight: 44, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 14 }}>
+          {day}
+          {hasEvents && !isSelected && <div style={{ position: 'absolute', bottom: 3, left: '50%', transform: 'translateX(-50%)', width: 6, height: 6, background: '#ff9800', borderRadius: '50%' }} />}
+        </div>
+      )
+    }
+    return (
+      <div>
+        <div className="section-header"><h2 className="section-title">📅 Calendar</h2></div>
+        <div className="calendar-inline">
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+            <button onClick={() => navigateMonth(-1)} style={{ padding: '7px 14px', border: 'none', borderRadius: 6, cursor: 'pointer', background: '#374151', color: '#fff', fontWeight: 600 }}>◀ Prev</button>
+            <h3 style={{ margin: 0, color: '#2196f3' }}>{monthNames[month]} {year}</h3>
+            <button onClick={() => navigateMonth(1)} style={{ padding: '7px 14px', border: 'none', borderRadius: 6, cursor: 'pointer', background: '#374151', color: '#fff', fontWeight: 600 }}>Next ▶</button>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7,1fr)', gap: 6, marginBottom: 8 }}>
+            {dayNames.map(n => <div key={n} style={{ textAlign: 'center', fontWeight: 700, fontSize: 12, padding: 6, color: '#777' }}>{n}</div>)}
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7,1fr)', gap: 6 }}>{days}</div>
+          {selectedDate && (
+            <div style={{ marginTop: 20, borderTop: '2px solid #eee', paddingTop: 16 }}>
+              <h4 style={{ margin: '0 0 10px', color: '#2196f3' }}>📅 {selectedDate.toLocaleDateString('ro-RO', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}</h4>
+              {getJobsForDate(selectedDate).length > 0 && <div style={{ marginBottom: 12 }}><strong>Jobs ({getJobsForDate(selectedDate).length}):</strong>{getJobsForDate(selectedDate).map(j => <div key={j.id} style={{ fontSize: 13, marginLeft: 12, padding: '5px 8px', background: '#f5f5f5', borderRadius: 5, marginTop: 4 }}>• {j.name} - {j.client_name}</div>)}</div>}
+              {getTasksForDate(selectedDate).length > 0 && <div><strong>Tasks ({getTasksForDate(selectedDate).length}):</strong>{getTasksForDate(selectedDate).map(t => { const j = jobs.find(jj => jj.id === t.job_id); return <div key={t.id} style={{ fontSize: 13, marginLeft: 12, padding: '5px 8px', background: t.status === 'completed' ? '#e8f5e9' : '#fff3e0', borderRadius: 5, marginTop: 4 }}>• {t.name} {j && `(${j.name})`} - <strong>{t.status}</strong></div> })}</div>}
+              {getJobsForDate(selectedDate).length === 0 && getTasksForDate(selectedDate).length === 0 && <p style={{ color: '#6b7280', fontStyle: 'italic', fontSize: 13 }}>Nu sunt evenimente în această zi.</p>}
+            </div>
+          )}
+        </div>
+      </div>
+    )
+  }
 
-          return (
-            <div key={job.id} style={{ marginBottom: 16, padding: 12, border: '1px solid #ccc', borderRadius: 8 }}>
-              {isEditing ? (
-                <div style={{ marginBottom: 8 }}>
-                  <input
-                    placeholder="Nume Job"
-                    value={jobEdits.name || ''}
-                    onChange={e => setJobEdits(prev => ({ ...prev, name: e.target.value }))}
-                    style={{ marginRight: 8 }}
-                  />
-                  <input
-                    placeholder="Nume Client (full)"
-                    value={jobEdits.client_name || ''}
-                    onChange={e => setJobEdits(prev => ({ ...prev, client_name: e.target.value }))}
-                    style={{ marginRight: 8 }}
-                  />
-                  
-                  {/* removed legacy first/last edit inputs; use client_name only */}
-                  <input placeholder="Serie buletin" value={jobEdits.client_id_series || ''} onChange={e => setJobEdits(prev => ({ ...prev, client_id_series: e.target.value }))} style={{ marginTop: 6 }} />
-                  <input placeholder="CNP" value={jobEdits.client_cnp || ''} onChange={e => setJobEdits(prev => ({ ...prev, client_cnp: e.target.value }))} style={{ marginTop: 6 }} />
-                  <input placeholder="Adresa" value={jobEdits.client_address || ''} onChange={e => setJobEdits(prev => ({ ...prev, client_address: e.target.value }))} style={{ marginTop: 6 }} />
-                  <input
-                    type="email"
-                    placeholder="Email Client"
-                    value={jobEdits.client_email || ''}
-                    onChange={e => setJobEdits(prev => ({ ...prev, client_email: e.target.value }))}
-                    style={{ marginRight: 8 }}
-                  />
-                  <input
-                    placeholder="Telefon Client"
-                    value={jobEdits.client_phone || ''}
-                    onChange={e => setJobEdits(prev => ({ ...prev, client_phone: e.target.value }))}
-                    style={{ marginRight: 8 }}
-                  />
-                  <select value={jobEdits.priority || 'normal'} onChange={e => setJobEdits(prev => ({ ...prev, priority: e.target.value }))} style={{ marginRight: 8, width: 140, minWidth: 120 }}>
-                    <option value="normal">Normal</option>
-                    <option value="repede">Repede</option>
-                    <option value="urgent">Urgent</option>
-                  </select>
-                  <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, marginRight: 8 }}>
-                    <label style={{ fontSize: 12 }}>Valoare Job:</label>
-                    <input
-                      type="number"
-                      step="0.01"
-                      placeholder="Valoare totală"
-                      value={jobEdits.total_value != null ? jobEdits.total_value : ''}
-                      onChange={e => setJobEdits(prev => ({ ...prev, total_value: e.target.value }))}
-                      style={{ width: 120, padding: 6 }}
-                    />
-                  </div>
-                  <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, marginRight: 8 }}>
-                    <label style={{ fontSize: 12 }}>Bani încasați:</label>
-                    <input
-                      type="number"
-                      step="0.01"
-                      placeholder="Suma încasată"
-                      value={jobEdits.amount_paid != null ? jobEdits.amount_paid : ''}
-                      onChange={e => setJobEdits(prev => ({ ...prev, amount_paid: e.target.value }))}
-                      style={{ width: 120, padding: 6 }}
-                    />
-                  </div>
-                  <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, marginRight: 8 }}>
-                    <label style={{ fontSize: 12 }}>Nr. ordine:</label>
-                    <input
-                      type="number"
-                      placeholder="Număr ordine"
-                      value={jobEdits.order_number != null ? jobEdits.order_number : ''}
-                      onChange={e => setJobEdits(prev => ({ ...prev, order_number: e.target.value }))}
-                      style={{ width: 100, padding: 6 }}
-                      min="1"
-                    />
-                  </div>
-                  <select value={jobEdits.status || 'todo'} onChange={e => setJobEdits(prev => ({ ...prev, status: e.target.value }))} style={{ marginRight: 8 }}>
-                    <option value="todo">Todo</option>
-                    <option value="completed">Completed</option>
-                  </select>
-                  <button onClick={() => saveJob(job.id)} style={{ marginRight: 4, fontSize: 12 }}>💾 Salvează</button>
-                  <button onClick={cancelEditJob} style={{ fontSize: 12 }}>❌ Anulează</button>
+  const renderMonthlyReport = () => {
+    const monthNames = ['Ianuarie','Februarie','Martie','Aprilie','Mai','Iunie','Iulie','August','Septembrie','Octombrie','Noiembrie','Decembrie']
+    const report = buildMonthlyReportData({ tasks, profiles, users, month: reportMonth.getMonth(), year: reportMonth.getFullYear() })
+    const exportCSV = async () => {
+      try {
+        const csv = generateMonthlyReportCsv({ tasks, profiles, users, month: reportMonth.getMonth(), year: reportMonth.getFullYear() })
+        downloadCsv(csv, `raport_${reportMonth.getFullYear()}_${String(reportMonth.getMonth()+1).padStart(2,'0')}.csv`)
+      } catch (e) { setError(e.message) }
+    }
+    return (
+      <div>
+        <div className="section-header"><h2 className="section-title">📊 Raport Lunar</h2></div>
+        <div style={{ background: 'white', borderRadius: 12, padding: 20, boxShadow: '0 2px 8px rgba(0,0,0,0.06)' }}>
+          <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: 16, flexWrap: 'wrap' }}>
+            <button onClick={() => navigateReportMonth(-1)} style={{ padding: '6px 12px', border: 'none', borderRadius: 6, cursor: 'pointer', background: '#374151', color: '#fff', fontWeight: 700 }}>◀</button>
+            <h3 style={{ margin: 0 }}>{monthNames[reportMonth.getMonth()]} {reportMonth.getFullYear()}</h3>
+            <button onClick={() => navigateReportMonth(1)} style={{ padding: '6px 12px', border: 'none', borderRadius: 6, cursor: 'pointer', background: '#374151', color: '#fff', fontWeight: 700 }}>▶</button>
+            <span style={{ marginLeft: 12, fontSize: 13, color: '#555' }}>Total: <strong>{report.totalTasks}</strong> taskuri | <strong>{report.overallTotal.toFixed(2)} lei</strong></span>
+            <button onClick={() => {
+              const wb = XLSX.utils.book_new()
+              const employees = profiles.filter(p => p.role === 'employee' || p.role === 'admin' || p.role === 'ceo')
+              employees.forEach(emp => {
+                const empTasks = tasks.filter(t => { const a = Array.isArray(t.assigned_to) ? t.assigned_to : []; const ae = Array.isArray(t.assigned_to_emails) ? t.assigned_to_emails : []; return a.includes(emp.id) || ae.includes(emp.email) })
+                const empJobIds = [...new Set(empTasks.map(t => t.job_id))]
+                const empJobs = jobs.filter(j => empJobIds.includes(j.id))
+                const activeEmpJobs = empJobs.filter(j => j.status !== 'completed')
+                const completedEmpJobs = empJobs.filter(j => j.status === 'completed')
+                const rows = []
+                rows.push(['Tip', 'Lucrare', 'Client', 'Taskuri totale', 'Taskuri finalizate', 'Valoare totală (lei)', 'Deadline'])
+                activeEmpJobs.forEach(j => {
+                  const jt = tasks.filter(t => t.job_id === j.id)
+                  const myT = empTasks.filter(t => t.job_id === j.id)
+                  const deadline = myT.filter(t => t.deadline && t.status !== 'completed').sort((a,b)=>new Date(a.deadline)-new Date(b.deadline))[0]?.deadline
+                  rows.push(['În lucru', j.name, j.client_name || '', jt.length, jt.filter(t=>t.status==='completed').length, j.total_value || 0, deadline ? new Date(deadline).toLocaleDateString('ro-RO') : ''])
+                })
+                completedEmpJobs.forEach(j => {
+                  const jt = tasks.filter(t => t.job_id === j.id)
+                  rows.push(['Finalizat', j.name, j.client_name || '', jt.length, jt.filter(t=>t.status==='completed').length, j.total_value || 0, j.completed_at ? new Date(j.completed_at).toLocaleDateString('ro-RO') : ''])
+                })
+                rows.push([])
+                rows.push(['', '', '', '', '', 'TOTAL:', empJobs.reduce((s,j)=>s+(parseFloat(j.total_value)||0),0).toFixed(2)])
+                const ws = XLSX.utils.aoa_to_sheet(rows)
+                XLSX.utils.book_append_sheet(wb, ws, (emp.full_name || emp.email).slice(0, 31))
+              })
+              XLSX.writeFile(wb, `raport_${reportMonth.getFullYear()}_${String(reportMonth.getMonth()+1).padStart(2,'0')}.xlsx`)
+            }} style={{ marginLeft: 'auto', padding: '7px 14px', background: '#1976d2', color: 'white', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13 }}>📊 Export Excel</button>
+          </div>
+          <div style={{ overflowX: 'auto', marginBottom: 16 }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+              <thead><tr>{['Colaborator','Email','Taskuri','Valoare (lei)'].map(h => <th key={h} style={{ textAlign: h === 'Taskuri' || h === 'Valoare (lei)' ? 'right' : 'left', padding: '8px 12px', borderBottom: '2px solid #eee', color: '#555' }}>{h}</th>)}</tr></thead>
+              <tbody>{report.rows.map(row => <tr key={row.assigned_to || 'u'}><td style={{ padding: '8px 12px', borderBottom: '1px solid #f5f5f5' }}>{row.profile ? (row.profile.full_name || row.profile.email) : '(Neasignat)'}</td><td style={{ padding: '8px 12px', borderBottom: '1px solid #f5f5f5', color: '#666' }}>{row.profile?.email || 'N/A'}</td><td style={{ padding: '8px 12px', borderBottom: '1px solid #f5f5f5', textAlign: 'right' }}>{row.count}</td><td style={{ padding: '8px 12px', borderBottom: '1px solid #f5f5f5', textAlign: 'right', fontWeight: 700 }}>{row.totalValue.toFixed(2)}</td></tr>)}</tbody>
+            </table>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px,1fr))', gap: 12 }}>
+            {report.rows.length === 0 && <div style={{ color: '#6b7280', fontSize: 13 }}>Nu s-au găsit taskuri finalizate în luna selectată.</div>}
+            {report.rows.map(row => (
+              <div key={row.assigned_to || 'u'} style={{ padding: 12, border: '1px solid #e0e0e0', borderRadius: 8 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
+                  <div><div style={{ fontWeight: 700 }}>{row.profile ? displayUserLabel(row.profile) : '(Neasignat)'}</div><div style={{ fontSize: 12, color: '#666' }}>{row.count} taskuri</div></div>
+                  <div style={{ fontWeight: 700 }}>{row.totalValue.toFixed(2)} lei</div>
                 </div>
-              ) : (
-                !isMobile ? (
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                      <div>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                        <strong>{idx + 1}. {job.name}</strong>
-                        {job.order_number && <span style={{ padding: '4px 8px', borderRadius: 6, fontSize: 12, color: 'white', backgroundColor: '#2196F3' }}>Nr. {job.order_number}</span>}
-                        <span> - {job.client_name} ({job.status})</span>
-                      </div>
-                      <div style={{ fontSize: 12, color: '#4CAF50', fontWeight: 'bold' }}>💵 Bani încasați: {job.amount_paid != null ? parseFloat(job.amount_paid).toFixed(2) + ' lei' : '0.00 lei'}</div>
-                      <div style={{ fontSize: 11, color: '#666' }}>
-                        ⏱️ Timp estimat: <strong>{formatDuration(totalHours)}</strong>
-                        {(() => {
-                          const earliestDeadline = jobTasks.filter(t => t.deadline).sort((a, b) => new Date(a.deadline) - new Date(b.deadline))[0];
-                          return earliestDeadline ? ` → Termen limită: ${new Date(earliestDeadline.deadline).toLocaleDateString('ro-RO', { year: 'numeric', month: 'long', day: 'numeric' })}` : '';
-                        })()}
-                      </div>
-                    </div>
-                    <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-                      <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                        <label style={{ fontSize: 11, color: '#333' }}>💵 Încasat:</label>
-                        <input
-                          type="number"
-                          step="0.01"
-                          min="0"
-                          value={amountPaidDraft[job.id] !== undefined ? amountPaidDraft[job.id] : (job.amount_paid != null ? job.amount_paid : '')}
-                          onChange={e => handleAmountPaidChange(job.id, e.target.value)}
-                          style={{ width: 110, padding: 6 }}
-                        />
-                        <button onClick={() => saveAmountPaid(job.id)} style={{ fontSize: 12 }}>💾</button>
-                      </div>
-                      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-                        <button onClick={() => setExpandedJob(isExpanded ? null : job.id)} style={{ fontSize: 12 }}>
-                          {isExpanded ? '🔼 Ascunde' : '🔽 Detalii'}
-                        </button>
-                        <button onClick={() => startEditJob(job)} style={{ fontSize: 12 }}>✏️ Editează</button>
-                        <button onClick={() => downloadPdfForJob(job)} style={{ fontSize: 12 }}>📄 Descarcă PDF</button>
-                        <button onClick={() => deleteJob(job.id)} style={{ fontSize: 12, color: 'red' }}>🗑️ Șterge</button>
-                      </div>
-                    </div>
+                <div style={{ borderTop: '1px dashed #eee', paddingTop: 8 }}>
+                  {row.tasks.map(t => { const j = jobs.find(jj => jj.id === t.job_id); return <div key={t.id} style={{ marginBottom: 6, fontSize: 12 }}><div><strong>{t.name}</strong>{j && <span style={{ color: '#666' }}> — {j.name}</span>}</div><div style={{ color: '#777' }}>Valoare: {(parseFloat(t.value) || 0).toFixed(2)} lei | {new Date(t.completed_at).toLocaleString('ro-RO')}</div></div> })}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  const renderEchipa = () => {
+    const employees = profiles.filter(p => p.role === 'employee' || p.role === 'admin' || p.role === 'ceo')
+    const toggleEmp = (id) => setExpandedEmployees(prev => { const s = new Set(prev); s.has(id) ? s.delete(id) : s.add(id); return s })
+
+    const notifyEmployee = async (e, emp) => {
+      e.stopPropagation()
+      if (notifyingEmployees[emp.id] === 'loading') return
+      setNotifyingEmployees(prev => ({ ...prev, [emp.id]: 'loading' }))
+      try {
+        const token = localStorage.getItem('access_token')
+        const res = await fetch('/api/notify-employee', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: token ? `Bearer ${token}` : '' },
+          body: JSON.stringify({ employeeId: emp.id, employeeEmail: emp.email })
+        })
+        const data = await res.json().catch(() => ({}))
+        if (!res.ok) throw new Error(data.error || 'Eroare server')
+        const state = data.sent === false ? 'no_tasks' : 'sent'
+        setNotifyingEmployees(prev => ({ ...prev, [emp.id]: state }))
+        setTimeout(() => setNotifyingEmployees(prev => { const n = { ...prev }; delete n[emp.id]; return n }), 3000)
+      } catch (err) {
+        setNotifyingEmployees(prev => ({ ...prev, [emp.id]: 'error' }))
+        setTimeout(() => setNotifyingEmployees(prev => { const n = { ...prev }; delete n[emp.id]; return n }), 3000)
+      }
+    }
+
+    const exportEchipaExcel = () => {
+      const wb = XLSX.utils.book_new()
+      employees.forEach(emp => {
+        const empTasks = tasks.filter(t => { const a = Array.isArray(t.assigned_to) ? t.assigned_to : []; const ae = Array.isArray(t.assigned_to_emails) ? t.assigned_to_emails : []; return a.includes(emp.id) || ae.includes(emp.email) })
+        const pending = empTasks.filter(t => t.status !== 'completed')
+        const rows = [['Task', 'Lucrare', 'Client', 'Valoare (lei)', 'Deadline', 'Status']]
+        pending.forEach(t => { const j = jobs.find(jj => jj.id === t.job_id); const statusLabel = t.status === 'stand_by' ? 'Stand By' : 'În lucru'; rows.push([t.name, j?.name || '', j?.client_name || '', t.value || '', t.deadline ? new Date(t.deadline).toLocaleDateString('ro-RO') : '', statusLabel]) })
+        rows.push([], ['', '', '', 'Total valoare:', pending.reduce((s,t)=>s+(parseFloat(t.value)||0),0).toFixed(2), ''])
+        const ws = XLSX.utils.aoa_to_sheet(rows)
+        XLSX.utils.book_append_sheet(wb, ws, (emp.full_name || emp.email).slice(0, 31))
+      })
+      XLSX.writeFile(wb, `echipa_${new Date().toISOString().slice(0,10)}.xlsx`)
+    }
+    return (
+      <div>
+        <div className="section-header">
+          <h2 className="section-title">👥 Echipă — Taskuri per Angajat</h2>
+          <button onClick={exportEchipaExcel} style={{ padding: '9px 18px', background: '#1976d2', color: 'white', border: 'none', borderRadius: 7, cursor: 'pointer', fontSize: 13, fontWeight: 600 }}>📊 Export Excel</button>
+        </div>
+        {employees.length === 0 && <p style={{ color: '#6b7280' }}>Nu sunt angajați.</p>}
+        {employees.map(emp => {
+          const empTasks = tasks.filter(t => { const a = Array.isArray(t.assigned_to) ? t.assigned_to : []; const ae = Array.isArray(t.assigned_to_emails) ? t.assigned_to_emails : []; return a.includes(emp.id) || ae.includes(emp.email) })
+          const pending = empTasks.filter(t => t.status !== 'completed')
+          const isOpen = expandedEmployees.has(emp.id)
+          return (
+            <div key={emp.id} style={{ background: 'white', borderRadius: 10, border: '1px solid #e5e7eb', marginBottom: 10, boxShadow: '0 1px 4px rgba(0,0,0,0.05)', overflow: 'hidden' }}>
+              <div onClick={() => toggleEmp(emp.id)} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '14px 16px', cursor: 'pointer', userSelect: 'none' }}>
+                <div>
+                  <div style={{ fontWeight: 700, fontSize: 15 }}>{emp.full_name || emp.email}</div>
+                  <div style={{ fontSize: 12, color: '#666', marginTop: 2 }}>{emp.email} · <span style={{ background: '#e3f2fd', color: '#1565c0', padding: '1px 6px', borderRadius: 8, fontWeight: 600 }}>{emp.role}</span></div>
+                </div>
+                <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+                  <div style={{ textAlign: 'right', fontSize: 13 }}>
+                    <span style={{ background: pending.length > 0 ? '#fff3e0' : '#e8f5e9', color: pending.length > 0 ? '#e65100' : '#2e7d32', padding: '2px 10px', borderRadius: 10, fontWeight: 700 }}>{pending.length} active</span>
+                    <span style={{ marginLeft: 6, background: '#e8f5e9', color: '#2e7d32', padding: '2px 10px', borderRadius: 10, fontWeight: 700 }}>{empTasks.filter(t => t.status === 'completed').length} finalizate</span>
                   </div>
-                ) : (
-                  <button
-                    onClick={() => setExpandedJob(isExpanded ? null : job.id)}
-                    style={{ width: '100%', textAlign: 'left', padding: '12px 14px', borderRadius: 10, border: '1px solid #d0d7de', background: '#f8fafc', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 8 }}
-                  >
-                    <span style={{ minWidth: 0 }}>
-                      <strong style={{ display: 'block' }}>{idx + 1}. {job.name}</strong>
-                      <span style={{ display: 'block', fontSize: 12, color: '#555' }}>{job.client_name} ({job.status})</span>
-                    </span>
-                    <span>{isExpanded ? '▲' : '▼'}</span>
-                  </button>
-                )
-              )}
-
-              {isExpanded && (
-                <div style={{ marginTop: 8, paddingLeft: 16, borderLeft: '3px solid #4CAF50' }}>
-                  {isMobile && (
-                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
-                      <button onClick={() => startEditJob(job)} style={{ fontSize: 12 }}>✏️ Editează</button>
-                      <button onClick={() => downloadPdfForJob(job)} style={{ fontSize: 12 }}>📄 Descarcă PDF</button>
-                      <button onClick={() => deleteJob(job.id)} style={{ fontSize: 12, color: 'red' }}>🗑️ Șterge</button>
-                      <div style={{ display: 'flex', gap: 6, width: '100%', alignItems: 'center', flexWrap: 'wrap' }}>
-                        <label style={{ fontSize: 11, color: '#333' }}>💵 Încasat:</label>
-                        <input
-                          type="number"
-                          step="0.01"
-                          min="0"
-                          value={amountPaidDraft[job.id] !== undefined ? amountPaidDraft[job.id] : (job.amount_paid != null ? job.amount_paid : '')}
-                          onChange={e => handleAmountPaidChange(job.id, e.target.value)}
-                          style={{ width: 120, padding: 6 }}
-                        />
-                        <button onClick={() => saveAmountPaid(job.id)} style={{ fontSize: 12 }}>💾 Salvează încasat</button>
-                      </div>
-                    </div>
-                  )}
-                  <div style={{ fontSize: 12, color: '#555', marginBottom: 8 }}>
-                    <div>Client Email: {job.client_email || 'N/A'}</div>
-                    <div>Client Telefon: {job.client_phone || 'N/A'}</div>
-                    <div>Created at: {new Date(job.created_at).toLocaleString('ro-RO')}</div>
-                  </div>
-
-                  <h4 style={{ fontSize: 14, marginBottom: 8 }}>Taskuri ({jobTasks.length})</h4>
-                  {jobTasks.map(task => {
-                    const isTaskExpanded = expandedTask === task.id
-                    const isTaskEditing = editingTaskId === task.id
-                    const assignedProfiles = (profiles || []).filter(p => Array.isArray(task.assigned_to) ? task.assigned_to.includes(p.id) : task.assigned_to === p.id)
-
+                  {(() => {
+                    const ns = notifyingEmployees[emp.id]
+                    const btnLabel = ns === 'loading' ? '⏳ Se trimite...' : ns === 'sent' ? '✅ Trimis!' : ns === 'no_tasks' ? '✅ Fără taskuri' : ns === 'error' ? '❌ Eroare' : '🔔 Notifică'
+                    const btnColor = ns === 'sent' || ns === 'no_tasks' ? '#2e7d32' : ns === 'error' ? '#c62828' : '#e65100'
                     return (
-                      <div key={task.id} style={{ marginBottom: 8, padding: 8, border: '1px solid #ddd', borderRadius: 4, backgroundColor: task.status === 'completed' ? '#e8f5e9' : 'white' }}>
-                        {isTaskEditing ? (
-                          <div>
-                            <input
-                              placeholder="Nume Task"
-                              value={taskEdits.name || ''}
-                              onChange={e => setTaskEdits(prev => ({ ...prev, name: e.target.value }))}
-                              style={{ marginBottom: 4, width: '100%' }}
-                            />
-                            <textarea
-                              placeholder="Descriere"
-                              value={taskEdits.description || ''}
-                              onChange={e => setTaskEdits(prev => ({ ...prev, description: e.target.value }))}
-                              style={{ marginBottom: 4, width: '100%' }}
-                            />
-                            <div style={{ display: 'flex', gap: 8, marginBottom: 4, alignItems: 'center' }}>
-                              <label style={{ fontSize: 12 }}>Ore:</label>
-                              <input
-                                type="number"
-                                placeholder="Ore estimate"
-                                value={taskEdits.estimated_hours || ''}
-                                onChange={e => setTaskEdits(prev => ({ ...prev, estimated_hours: e.target.value }))}
-                                style={{ width: 100 }}
-                                step="0.5"
-                                min="0"
-                              />
-                            </div>
-                            <div style={{ display: 'flex', gap: 8, marginBottom: 8, alignItems: 'center' }}>
-                              <label style={{ fontSize: 12 }}>Termen (deadline):</label>
-                              <input
-                                type="datetime-local"
-                                value={taskEdits.deadline ? taskEdits.deadline.slice(0,16) : ''}
-                                onChange={e => setTaskEdits(prev => ({ ...prev, deadline: e.target.value }))}
-                                style={{ padding: 6 }}
-                              />
-                            </div>
-                            {/* Admin: task value editing removed */}
-                            <select value={taskEdits.status || 'todo'} onChange={e => setTaskEdits(prev => ({ ...prev, status: e.target.value }))} style={{ marginRight: 8 }}>
-                              <option value="todo">Todo</option>
-                              <option value="completed">Completed</option>
-                            </select>
-                            <div style={{ marginRight: 8 }}>
-                              <MultiAssignSelector profiles={profiles} selectedIds={taskEdits.assigned_to || []} onChange={v => setTaskEdits(prev => ({ ...prev, assigned_to: v }))} />
-                            </div>
-                            <button onClick={() => saveTask(task.id)} style={{ fontSize: 11, marginRight: 4 }}>💾 Salvează</button>
-                            <button onClick={cancelEditTask} style={{ fontSize: 11 }}>❌ Anulează</button>
-                          </div>
-                        ) : (
-                          <div>
-                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                              <div>
-                                <strong>{task.name}</strong> ({task.status})
-                                <div style={{ fontSize: 11, color: '#666' }}>
-                                  Asignat: {assignedProfiles.length > 0 ? assignedProfiles.map(p => displayUserLabel(p)).join(', ') : '(Neasignat)'}
-                                  {task.estimated_hours && (
-                                    <span> | ⏱️ {formatDuration(task.estimated_hours)}{task.deadline ? ` → Termen: ${new Date(task.deadline).toLocaleDateString('ro-RO', { year: 'numeric', month: 'long', day: 'numeric' })}` : ''}</span>
-                                  )}
-                                  {task.value != null && (
-                                    <span> | 💰 Valoare: {parseFloat(task.value).toFixed(2)}</span>
-                                  )}
-                                </div>
-                              </div>
-                              <div style={{ position: 'relative' }}>
-                                {!isMobile ? (
-                                  <div style={{ display: 'flex', gap: 4, alignItems: 'center', flexWrap: 'wrap' }}>
-                                    <button onClick={() => setExpandedTask(isTaskExpanded ? null : task.id)} style={{ fontSize: 11 }}>
-                                      {isTaskExpanded ? '🔼' : '🔽'}
-                                    </button>
-                                    <button onClick={() => toggleComplete(task)} style={{ fontSize: 11 }}>
-                                      {task.status === 'completed' ? '↩️ Undo' : '✅ Done'}
-                                    </button>
-                                    <button onClick={() => startEditTask(task)} style={{ fontSize: 11 }}>✏️</button>
-                                    <button onClick={() => deleteTask(task.id)} style={{ fontSize: 11, color: 'red' }}>🗑️</button>
-                                    <button onClick={() => setOverflowTask(overflowTask === task.id ? null : task.id)} style={{ fontSize: 11 }}>
-                                      {overflowTask === task.id ? '▲ Mai puțin' : '⋯ Mai mult'}
-                                    </button>
-                                  </div>
-                                ) : (
-                                  <div>
-                                    <button onClick={() => setTaskMenuOpen(taskMenuOpen === task.id ? null : task.id)} style={{ fontSize: 16, padding: '6px 8px' }}>⋮</button>
-                                    {taskMenuOpen === task.id && (
-                                      <div style={{ position: 'absolute', right: 0, top: 32, background: 'white', border: '1px solid #ddd', borderRadius: 8, boxShadow: '0 6px 18px rgba(0,0,0,0.12)', zIndex: 60, minWidth: 180, padding: 8 }}>
-                                        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                                          <button onClick={() => { setExpandedTask(isTaskExpanded ? null : task.id); setTaskMenuOpen(null) }} style={{ textAlign: 'left' }}>{isTaskExpanded ? 'Ascunde detalii' : 'Vezi detalii'}</button>
-                                          <button onClick={() => { toggleComplete(task); setTaskMenuOpen(null) }} style={{ textAlign: 'left' }}>{task.status === 'completed' ? '↩️ Undo' : '✅ Done'}</button>
-                                          <button onClick={() => { startEditTask(task); setTaskMenuOpen(null) }} style={{ textAlign: 'left' }}>✏️ Edit</button>
-                                          <button onClick={() => { deleteTask(task.id); setTaskMenuOpen(null) }} style={{ textAlign: 'left', color: 'red' }}>🗑️ Șterge</button>
-                                          <button onClick={() => { setOverflowTask(overflowTask === task.id ? null : task.id); setTaskMenuOpen(null) }} style={{ textAlign: 'left' }}>{overflowTask === task.id ? 'Mai puțin' : 'Mai mult'}</button>
-                                        </div>
-                                      </div>
-                                    )}
-                                  </div>
-                                )}
-                              </div>
-                            </div>
-
-                            {isTaskExpanded && (
-                              <div style={{ marginTop: 8, fontSize: 12, color: '#555' }}>
-                                <div>Descriere: {task.description || 'N/A'}</div>
-                                <div style={{ marginTop: 6, display: 'flex', gap: 8, flexWrap: 'wrap', fontSize: 12 }}>
-                                  {(Array.isArray(task.completers) && task.completers.length > 0) ? (
-                                    <div>Done by: {task.completers.map((c, i) => {
-                                      const prof = (profiles || []).find(p => p.id === c.id)
-                                      const label = prof ? displayUserLabel(prof) : (c.email || c.id)
-                                      return `${label}${c.amount != null ? ` (${c.amount} lei)` : ''}${i < task.completers.length - 1 ? ', ' : ''}`
-                                    }).join('')}</div>
-                                  ) : task.completed_by ? (
-                                    <div>Done by: {(() => {
-                                      const completer = (profiles || []).find(p => p.id === task.completed_by)
-                                      return completer ? displayUserLabel(completer) : (task.completed_by_email || task.completed_by)
-                                    })()}</div>
-                                  ) : null}
-                                </div>
-                                {task.completed_at && <div style={{ marginTop: 6 }}>Completed at: {new Date(task.completed_at).toLocaleString('ro-RO')}</div>}
-                                <div style={{ marginTop: 6 }}>Created at: {new Date(task.created_at).toLocaleString('ro-RO')}</div>
-                                {task.deadline && <div style={{ marginTop: 6 }}>Termen limită: {new Date(task.deadline).toLocaleString('ro-RO')}</div>}
-                              </div>
-                            )}
-
-                            {/* Overflow detailed panel for long content */}
-                            {overflowTask === task.id && (
-                              <div style={{ marginTop: 8, padding: 8, border: '1px solid var(--border-color)', borderRadius: 8, background: '#fafafa', maxHeight: 220, overflow: 'auto' }}>
-                                <div><strong>Descriere completă:</strong><div style={{ marginTop: 6 }}>{task.description || 'N/A'}</div></div>
-                                {(Array.isArray(task.completers) && task.completers.length > 0) && (
-                                  <div style={{ marginTop: 8 }}><strong>Completat de:</strong> {task.completers.map((c, i) => {
-                                    const prof = (profiles || []).find(p => p.id === c.id)
-                                    const label = prof ? displayUserLabel(prof) : (c.email || c.id)
-                                    return `${label}${c.amount != null ? ` (${c.amount} lei)` : ''}${i < task.completers.length - 1 ? ', ' : ''}`
-                                  }).join('')}</div>
-                                )}
-                                {task.completed_at && <div style={{ marginTop: 8 }}><strong>Completed at:</strong> {new Date(task.completed_at).toLocaleString('ro-RO')}</div>}
-                                <div style={{ marginTop: 8 }}><strong>Created at:</strong> {new Date(task.created_at).toLocaleString('ro-RO')}</div>
-                                {task.deadline && <div style={{ marginTop: 8 }}><strong>Termen limită:</strong> {new Date(task.deadline).toLocaleString('ro-RO')}</div>}
-                              </div>
-                            )}
-                          </div>
-                        )}
-                      </div>
+                      <button
+                        onClick={(e) => notifyEmployee(e, emp)}
+                        disabled={ns === 'loading'}
+                        style={{ padding: '5px 12px', background: btnColor, color: 'white', border: 'none', borderRadius: 7, cursor: ns === 'loading' ? 'default' : 'pointer', fontSize: 12, fontWeight: 600, whiteSpace: 'nowrap', opacity: ns === 'loading' ? 0.7 : 1 }}
+                      >{btnLabel}</button>
                     )
-                  })}
-
-                  {addingTaskToJob === job.id ? (
-                    <form onSubmit={handleAddTask} style={{
-                      marginTop: 12,
-                      padding: 12,
-                      backgroundColor: '#e3f2fd',
-                      borderRadius: 6,
-                      border: '2px solid #2196F3'
-                    }}>
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                        <input
-                          placeholder="Nume task nou"
-                          value={newTaskData.name}
-                          onChange={e => setNewTaskData(prev => ({ ...prev, name: e.target.value }))}
-                          required
-                          style={{ padding: '8px 12px', borderRadius: 4, border: '1px solid #ccc' }}
-                        />
-                        <textarea
-                          placeholder="Descriere"
-                          value={newTaskData.description || ''}
-                          onChange={e => setNewTaskData(prev => ({ ...prev, description: e.target.value }))}
-                          style={{
-                            padding: '8px 12px',
-                            borderRadius: 4,
-                            border: '1px solid #ccc',
-                            minHeight: 80,
-                            fontFamily: 'inherit'
-                          }}
-                        />
-                        <div style={{
-                          display: 'flex',
-                          gap: 12,
-                          flexWrap: 'wrap',
-                          alignItems: 'center'
-                        }}>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                            <label style={{ fontSize: 12, fontWeight: 'bold', whiteSpace: 'nowrap' }}>Ore:</label>
-                            <input
-                              type="number"
-                              placeholder="Ore"
-                              value={newTaskData.estimated_hours}
-                              onChange={e => setNewTaskData(prev => ({ ...prev, estimated_hours: e.target.value }))}
-                              style={{ width: 80, padding: '6px 8px', borderRadius: 4, border: '1px solid #ccc' }}
-                              step="0.5"
-                              min="0"
-                            />
+                  })()}
+                  <span style={{ fontSize: 18, color: '#374151' }}>{isOpen ? '▲' : '▼'}</span>
+                </div>
+              </div>
+              {isOpen && (
+                <div style={{ borderTop: '1px solid #f3f4f6', padding: '10px 16px 14px' }}>
+                  {pending.length === 0 ? <p style={{ color: '#6b7280', fontSize: 13, margin: 0 }}>Niciun task activ.</p> : (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                      {pending.sort((a,b) => { if (a.deadline && b.deadline) return new Date(a.deadline)-new Date(b.deadline); if (a.deadline) return -1; if (b.deadline) return 1; return 0 }).map(task => {
+                        const job = jobs.find(j => j.id === task.job_id)
+                        return (
+                          <div key={task.id} onClick={() => { if (job) { setPreviousSection('echipa'); setSelectedJobId(job.id); setActiveSection('job_detail') } }} style={{ padding: '8px 12px', background: '#f9fafb', borderRadius: 7, border: '1px solid #e5e7eb', cursor: job ? 'pointer' : 'default', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                            <div>
+                              <div style={{ fontWeight: 600, fontSize: 13 }}>{task.name}</div>
+                              {job && <div style={{ fontSize: 12, color: '#1976d2' }}>📁 {job.name} {job.client_name && <strong style={{ color: '#333' }}>— {job.client_name}</strong>}</div>}
+                            </div>
+                            <div style={{ flexShrink: 0 }}>{task.deadline && dlBadge(task.deadline, true)}</div>
                           </div>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                            <label style={{ fontSize: 12, fontWeight: 'bold', whiteSpace: 'nowrap' }}>Termen:</label>
-                            <input
-                              type="datetime-local"
-                              value={newTaskData.deadline || ''}
-                              onChange={e => setNewTaskData(prev => ({ ...prev, deadline: e.target.value }))}
-                              style={{ padding: '6px 8px', borderRadius: 4, border: '1px solid #ccc' }}
-                            />
-                          </div>
-                          <div style={{ flex: 1, minWidth: '200px' }}>
-                            <MultiAssignSelector
-                              profiles={profiles}
-                              selectedIds={newTaskData.assigned_to || []}
-                              onChange={v => setNewTaskData(prev => ({ ...prev, assigned_to: v }))}
-                            />
-                          </div>
-                        </div>
-                        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                          <button type="submit" className="btn btn-success" style={{ padding: '8px 16px', fontSize: '12px', fontWeight: 'bold' }}>
-                            ➕ Adaugă Task
-                          </button>
-                          <button type="button" onClick={cancelAddTask} className="btn btn-outline-secondary" style={{ padding: '8px 16px', fontSize: '12px' }}>
-                            Anulează
-                          </button>
-                        </div>
-                      </div>
-                    </form>
-                  ) : (
-                    <button
-                      onClick={() => startAddTaskToJob(job.id)}
-                      className="btn btn-secondary"
-                      style={{
-                        fontSize: 12,
-                        marginTop: 12,
-                        padding: '8px 12px',
-                        fontWeight: 'bold',
-                        width: isMobile ? '100%' : 'auto'
-                      }}
-                    >
-                      ➕ Adaugă task la job
-                    </button>
+                        )
+                      })}
+                    </div>
                   )}
                 </div>
               )}
             </div>
           )
         })}
-      </section>
+      </div>
+    )
+  }
+
+  const renderManageProfiles = () => (
+    <div>
+      <div className="section-header"><h2 className="section-title">👥 Profiluri & Angajați</h2><button onClick={() => setShowCreateProfile(s => !s)} style={{ padding: '9px 18px', background: '#16213e', color: 'white', border: 'none', borderRadius: 7, cursor: 'pointer', fontSize: 13, fontWeight: 600 }}>{showCreateProfile ? '✖ Anulează' : '+ Crează profil nou'}</button></div>
+
+      {showCreateProfile && (
+        <div style={{ marginBottom: 20, padding: 18, border: '2px solid #ff9800', borderRadius: 10, background: '#fff8f0' }}>
+          <h3 style={{ margin: '0 0 12px', fontSize: 15 }}>Crează cont nou</h3>
+          <form onSubmit={handleCreateNewProfile} style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
+            <input type="email" placeholder="Email" value={newProfileData.email} onChange={e => setNewProfileData(p => ({ ...p, email: e.target.value }))} required style={{ padding: '8px 11px', borderRadius: 6, border: '1px solid #ccc' }} />
+            <input placeholder="Nume Complet" value={newProfileData.full_name} onChange={e => setNewProfileData(p => ({ ...p, full_name: e.target.value }))} required style={{ padding: '8px 11px', borderRadius: 6, border: '1px solid #ccc' }} />
+            <input type="password" placeholder="Parolă" value={newProfileData.password} onChange={e => setNewProfileData(p => ({ ...p, password: e.target.value }))} required style={{ padding: '8px 11px', borderRadius: 6, border: '1px solid #ccc' }} />
+            <input type="password" placeholder="Confirmă Parola" value={newProfileData.confirmPassword} onChange={e => setNewProfileData(p => ({ ...p, confirmPassword: e.target.value }))} required style={{ padding: '8px 11px', borderRadius: 6, border: '1px solid #ccc' }} />
+            <select value={newProfileData.role} onChange={e => setNewProfileData(p => ({ ...p, role: e.target.value }))} style={{ padding: '8px 11px', borderRadius: 6, border: '1px solid #ccc' }}>
+              <option value="employee">Colaborator</option><option value="admin">Admin</option><option value="ceo">CEO</option>
+            </select>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button type="submit" disabled={loading} style={{ flex: 1, padding: '9px', background: '#4caf50', color: 'white', border: 'none', borderRadius: 6, cursor: 'pointer', fontWeight: 600 }}>Crează</button>
+              <button type="button" onClick={() => setShowCreateProfile(false)} style={{ flex: 1, padding: '9px', background: '#999', color: 'white', border: 'none', borderRadius: 6, cursor: 'pointer' }}>Anulează</button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
+        {profiles.length === 0 ? <p style={{ color: '#6b7280' }}>Nu sunt profiluri.</p> : profiles.map(profile => (
+          <div key={profile.id} style={{ padding: 14, border: '1px solid #e0e0e0', borderRadius: 9, background: 'white', boxShadow: '0 1px 3px rgba(0,0,0,0.05)' }}>
+            {editingProfileId === profile.id ? (
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                <input type="email" placeholder="Email" value={profileEdits.email || ''} onChange={e => setProfileEdits(p => ({ ...p, email: e.target.value }))} style={{ flex: '1 1 180px', padding: '6px 9px', borderRadius: 5, border: '1px solid #ccc' }} />
+                <input placeholder="Nume" value={profileEdits.full_name || ''} onChange={e => setProfileEdits(p => ({ ...p, full_name: e.target.value }))} style={{ flex: '1 1 160px', padding: '6px 9px', borderRadius: 5, border: '1px solid #ccc' }} />
+                <select value={profileEdits.role || 'employee'} onChange={e => setProfileEdits(p => ({ ...p, role: e.target.value }))} style={{ padding: '6px 9px', borderRadius: 5, border: '1px solid #ccc' }}><option value="employee">Colaborator</option><option value="admin">Admin</option><option value="ceo">CEO</option></select>
+                <button onClick={() => saveProfile(profile.id)} style={{ padding: '6px 12px', background: '#4caf50', color: 'white', border: 'none', borderRadius: 5, cursor: 'pointer', fontSize: 12 }}>💾 Salvează</button>
+                <button onClick={cancelEditProfile} style={{ padding: '6px 12px', background: '#999', color: 'white', border: 'none', borderRadius: 5, cursor: 'pointer', fontSize: 12 }}>Anulează</button>
+              </div>
+            ) : (
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                <div>
+                  <div style={{ fontWeight: 700, fontSize: 14 }}>{profile.full_name || '(Fără nume)'}</div>
+                  <div style={{ fontSize: 12, color: '#666' }}>{profile.email}</div>
+                  <div style={{ fontSize: 11, marginTop: 2 }}><span style={{ background: '#3949ab', color: '#fff', padding: '2px 7px', borderRadius: 8, fontWeight: 600 }}>{profile.role}</span></div>
+                </div>
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                  <button onClick={() => startEditProfile(profile)} style={{ padding: '5px 11px', background: '#1976d2', border: 'none', borderRadius: 5, cursor: 'pointer', fontSize: 12, color: '#fff', fontWeight: 600 }}>✏️ Editează</button>
+                  <button onClick={() => setProfileRole(profile.id, profile.role === 'admin' ? 'employee' : 'admin')} style={{ padding: '5px 11px', background: profile.role === 'admin' ? '#e65100' : '#2e7d32', border: 'none', borderRadius: 5, cursor: 'pointer', fontSize: 12, color: '#fff', fontWeight: 600 }}>{profile.role === 'admin' ? '⬇ Colaborator' : '⬆ Admin'}</button>
+                  <button onClick={() => handleChangePassword(profile)} style={{ padding: '5px 11px', background: '#6a1b9a', border: 'none', borderRadius: 5, cursor: 'pointer', fontSize: 12, color: '#fff', fontWeight: 600 }}>🔑 Parolă</button>
+                  <button onClick={() => deleteProfile(profile.id)} style={{ padding: '5px 11px', background: '#c62828', border: 'none', borderRadius: 5, cursor: 'pointer', fontSize: 12, color: '#fff', fontWeight: 600 }}>🗑️ Șterge</button>
+                </div>
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+      <div style={{ marginTop: 12 }}>
+        <button onClick={fetchProfiles} style={{ padding: '7px 14px', background: '#374151', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 12, fontWeight: 600 }}>🔄 Reîmprospătează profile</button>
+      </div>
+    </div>
+  )
+
+  const renderCreateJobModal = () => (
+    <div className="modal-overlay" onClick={e => { if (e.target === e.currentTarget) setShowCreateWithTasks(false) }}>
+      <div className="modal-box">
+        <div className="modal-header">
+          <span className="modal-title">Crează Lucrare Nouă</span>
+          <button className="modal-close" onClick={() => setShowCreateWithTasks(false)}>✕</button>
+        </div>
+        <form onSubmit={handleCreateJob}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <select value={jobNameType} onChange={e => setJobNameType(e.target.value)} required style={{ flex: '2 1 200px', padding: '8px 11px', borderRadius: 6, border: '1px solid #ccc' }}>
+                <option value="">-- Tipul lucrării *</option>
+                {JOB_NAME_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
+              </select>
+              <select value={jobPriority} onChange={e => setJobPriority(e.target.value)} style={{ flex: '1 1 120px', padding: '8px 11px', borderRadius: 6, border: '1px solid #ccc' }}>
+                <option value="normal">Normal</option><option value="repede">Repede</option><option value="urgent">Urgent</option>
+              </select>
+              <select value={jobCategory} onChange={e => setJobCategory(e.target.value)} style={{ flex: '1 1 150px', padding: '8px 11px', borderRadius: 6, border: '1px solid #ccc' }}>
+                <option value="">Fără categorie</option>
+                <option value="cadastru_sporadic">Cadastru Sporadic</option>
+                <option value="cadastru_sistematic">Cadastru Sistematic</option>
+                <option value="topografie">Topografie</option>
+                <option value="administrativ">Administrativ</option>
+              </select>
+            </div>
+            {jobNameType === 'Altele' && (
+              <input placeholder="Descrie tipul lucrării *" value={jobNameCustom} onChange={e => setJobNameCustom(e.target.value)} required style={{ padding: '8px 11px', borderRadius: 6, border: '1px solid #f59e0b', background: '#fffbeb' }} />
+            )}
+            <input placeholder="Nume client" value={clientname} onChange={e => setClientname(e.target.value)} style={{ padding: '8px 11px', borderRadius: 6, border: '1px solid #ccc' }} />
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <input placeholder="Serie buletin" value={clientIdSeries} onChange={e => setClientIdSeries(e.target.value)} style={{ flex: '1 1 110px', padding: '8px 11px', borderRadius: 6, border: '1px solid #ccc' }} />
+              <input placeholder="CNP" value={clientCNP} onChange={e => setClientCNP(e.target.value)} style={{ flex: '1 1 110px', padding: '8px 11px', borderRadius: 6, border: '1px solid #ccc' }} />
+              <input placeholder="Adresă" value={clientAddress} onChange={e => setClientAddress(e.target.value)} style={{ flex: '2 1 200px', padding: '8px 11px', borderRadius: 6, border: '1px solid #ccc' }} />
+            </div>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <input type="email" placeholder="Email client" value={clientemail} onChange={e => setClientemail(e.target.value)} style={{ flex: '1 1 170px', padding: '8px 11px', borderRadius: 6, border: '1px solid #ccc' }} />
+              <input placeholder="Telefon client" value={clientPhone} onChange={e => setClientPhone(e.target.value)} style={{ flex: '1 1 130px', padding: '8px 11px', borderRadius: 6, border: '1px solid #ccc' }} />
+              <input type="number" placeholder="Nr. ordine (opțional)" value={jobOrderNumber} onChange={e => setJobOrderNumber(e.target.value)} min="1" style={{ flex: '1 1 130px', padding: '8px 11px', borderRadius: 6, border: '1px solid #ccc' }} />
+            </div>
+
+            <div style={{ borderTop: '1px dashed #ddd', paddingTop: 12 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                <h4 style={{ margin: 0, fontSize: 14 }}>Taskuri (valoarea jobului = suma taskurilor)</h4>
+                <button type="button" onClick={addNewJobTask} style={{ padding: '5px 11px', background: '#e8f5e9', border: '1px solid #c8e6c9', borderRadius: 5, cursor: 'pointer', fontSize: 12, color: '#2e7d32' }}>+ Adaugă task</button>
+              </div>
+              {newJobTasks.map((t, i) => (
+                <div key={i} style={{ marginBottom: 10, padding: 10, border: '1px solid #eee', borderRadius: 7, background: '#f9f9f9', display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'flex-start' }}>
+                  <div style={{ flex: '1 1 280px' }}>
+                    <input placeholder="Nume task *" value={t.name} onChange={e => updateNewJobTaskField(i, 'name', e.target.value)} required style={{ width: '100%', marginBottom: 5, padding: '7px 9px', borderRadius: 5, border: '1px solid #ccc' }} />
+                    <textarea placeholder="Descriere" value={t.description || ''} onChange={e => updateNewJobTaskField(i, 'description', e.target.value)} style={{ width: '100%', minHeight: 70, padding: '7px 9px', borderRadius: 5, border: '1px solid #ccc' }} />
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 7, minWidth: 160 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}><label style={{ fontSize: 12, whiteSpace: 'nowrap' }}>Valoare:</label><input type="number" value={t.value} onChange={e => updateNewJobTaskField(i, 'value', e.target.value)} style={{ flex: 1, padding: '6px 8px', borderRadius: 5, border: '1px solid #ccc' }} step="0.01" min="0" /></div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <label style={{ fontSize: 12, whiteSpace: 'nowrap' }}>Deadline:</label>
+                        {!t.noDeadline && <input type="datetime-local" value={t.deadline ? t.deadline.slice(0, 16) : ''} onChange={e => updateNewJobTaskField(i, 'deadline', e.target.value)} required style={{ flex: 1, padding: '6px 8px', borderRadius: 5, border: '1px solid #ccc' }} />}
+                      </div>
+                      <label style={{ fontSize: 11, color: '#666', display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer' }}>
+                        <input type="checkbox" checked={!!t.noDeadline} onChange={e => { updateNewJobTaskField(i, 'noDeadline', e.target.checked); if (e.target.checked) updateNewJobTaskField(i, 'deadline', '') }} />
+                        Fără termen
+                      </label>
+                    </div>
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6, minWidth: 180 }}>
+                    <div style={{ fontSize: 12, fontWeight: 600, color: '#555' }}>Asignare:</div>
+                    <MultiAssignSelector profiles={profiles} selectedIds={t.assigned_to || []} onChange={v => updateNewJobTaskField(i, 'assigned_to', v)} />
+                  </div>
+                  <div style={{ width: '100%', borderTop: '1px solid #e5e7eb', paddingTop: 8, marginTop: 2, display: 'flex', justifyContent: 'flex-end' }}>
+                    <button type="button" onClick={() => removeNewJobTask(i)} style={{ fontSize: 12, color: '#c62828', background: '#ffebee', border: '1px solid #ffcdd2', borderRadius: 5, cursor: 'pointer', padding: '4px 12px', fontWeight: 600 }}>✕ Șterge task</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+          <div style={{ marginTop: 14, display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+            <button type="button" onClick={() => setShowCreateWithTasks(false)} style={{ padding: '9px 18px', background: '#f5f5f5', color: '#374151', border: '1px solid #ddd', borderRadius: 7, cursor: 'pointer', fontSize: 13 }}>Anulează</button>
+            <button type="submit" disabled={loading} style={{ padding: '9px 22px', background: '#16213e', color: 'white', border: 'none', borderRadius: 7, cursor: 'pointer', fontSize: 13, fontWeight: 600 }}>Crează Lucrare</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  )
+
+  return (
+    <div className="app-layout">
+      <aside className="app-sidebar">
+        <div className="sidebar-logo" onClick={() => setActiveSection('home')} role="button" tabIndex={0} onKeyDown={e => e.key === 'Enter' && setActiveSection('home')}>
+          <img src="/Sigla.svg" alt="Overview" />
+          <span className="sidebar-logo-text">Overview</span>
+        </div>
+
+        <nav className={`sidebar-nav${mobileSidebarOpen ? ' mobile-open' : ''}`}>
+          {navItem('home', '🏠', 'Acasă')}
+          {navItem('profil', '👤', 'Profil')}
+          <div>
+            {navItem('lucrari', '📁', 'Lucrări')}
+            <div className="sidebar-subnav">
+              {navItem('lucrari/cadastru_sporadic', '📍', 'Cadastru Sporadic', true)}
+              {navItem('lucrari/cadastru_sistematic', '🗺️', 'Cadastru Sistematic', true)}
+              {navItem('lucrari/topografie', '⛰️', 'Topografie', true)}
+              {navItem('administrativ', '📋', 'Administrativ', true)}
+            </div>
+          </div>
+          {navItem('lucrari_finalizate', '✅', 'Lucrări Finalizate')}
+          {navItem('echipa', '👥', 'Echipă')}
+          {navItem('calendar', '📅', 'Calendar')}
+          {navItem('raport_lunar', '📊', 'Raport Lunar')}
+          {navItem('profil_nou', '➕', 'Crează Profil Nou')}
+        </nav>
+
+        <div className="sidebar-footer">
+          <div className="sidebar-user-name">{currentUserProfile?.full_name || user?.email || 'Admin'}</div>
+          <div className="sidebar-user-role">{{ ceo: 'CEO', admin: 'Admin', employee: 'Colaborator' }[user?.role] || 'Admin'}</div>
+          <button className="sidebar-logout-btn" onClick={handleLogout}>🚪 Ieși din cont</button>
+        </div>
+      </aside>
+
+      <main className="app-main" onClick={() => { if (taskMenuOpen) setTaskMenuOpen(null) }}>
+        {loading && <div style={{ fontSize: 13, color: '#888', marginBottom: 12 }}>Se încarcă...</div>}
+        {error && <div className="dash-alert dash-alert-error">{error}<button onClick={() => setError(null)}>✕</button></div>}
+        {message && <div className="dash-alert dash-alert-success">{message}<button onClick={() => setMessage(null)}>✕</button></div>}
+
+        {activeSection === 'home' && renderHome()}
+        {activeSection === 'profil' && renderProfil()}
+        {activeSection === 'lucrari' && renderSection(activeJobs, 'Toate Lucrările', '📁', '')}
+        {activeSection === 'lucrari/cadastru_sporadic' && renderSection(activeJobs.filter(j => j.category === 'cadastru_sporadic'), 'Cadastru Sporadic', '📍', 'cadastru_sporadic')}
+        {activeSection === 'lucrari/cadastru_sistematic' && renderSection(activeJobs.filter(j => j.category === 'cadastru_sistematic'), 'Cadastru Sistematic', '🗺️', 'cadastru_sistematic')}
+        {activeSection === 'lucrari/topografie' && renderSection(activeJobs.filter(j => j.category === 'topografie'), 'Topografie', '⛰️', 'topografie')}
+        {activeSection === 'lucrari_finalizate' && (
+          <div>
+            <div className="section-header"><h2 className="section-title">✅ Lucrări Finalizate <span style={{ fontSize: 14, fontWeight: 400, color: '#777' }}>({completedJobs.length})</span></h2></div>
+            {renderJobList(completedJobs)}
+          </div>
+        )}
+        {activeSection === 'administrativ' && renderSection(activeJobs.filter(j => j.category === 'administrativ'), 'Administrativ', '📋', 'administrativ')}
+        {activeSection === 'calendar' && renderCalendar()}
+        {activeSection === 'echipa' && renderEchipa()}
+        {activeSection === 'raport_lunar' && renderMonthlyReport()}
+        {activeSection === 'profil_nou' && renderManageProfiles()}
+        {activeSection === 'job_detail' && renderJobDetail()}
+      </main>
+
+      <button className="sidebar-mobile-toggle" onClick={() => setMobileSidebarOpen(s => !s)} style={{ display: isMobile ? 'flex' : 'none' }}>☰</button>
+
+      {showCreateWithTasks && renderCreateJobModal()}
     </div>
   )
 }

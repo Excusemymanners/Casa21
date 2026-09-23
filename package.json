@@ -21,6 +21,7 @@
     "dotenv": "^17.2.3",
     "jsonwebtoken": "^9.0.3",
     "jwt-decode": "^4.0.0",
+    "node-cron": "^4.2.1",
     "nodemailer": "^7.0.10",
     "pdf-lib": "^1.17.1",
     "pdfkit": "^0.13.0",
@@ -31,10 +32,11 @@
     "react-router-dom": "^7.9.5",
     "react-scripts": "5.0.1",
     "recharts": "^3.3.0",
-    "web-vitals": "^2.1.4"
+    "web-vitals": "^2.1.4",
+    "xlsx": "^0.18.5"
   },
   "scripts": {
-    "start": "HOST=0.0.0.0 PORT=3000 DANGEROUSLY_DISABLE_HOST_CHECK=true BROWSER=none react-scripts start",
+    "start": "cross-env HOST=0.0.0.0 PORT=3000 DANGEROUSLY_DISABLE_HOST_CHECK=true BROWSER=none react-scripts start",
     "dev": "node scripts/start-local-db.js",
     "electron-dev": "concurrently \"npm run start\" \"wait-on http://localhost:3000 && ELECTRON_START_URL=http://localhost:3000 electron .\"",
     "electron-build": "npm run build && electron .",
@@ -47,6 +49,7 @@
   "main": "electron-main.js",
   "devDependencies": {
     "concurrently": "^8.0.1",
+    "cross-env": "^7.0.3",
     "electron": "^26.1.0",
     "electron-builder": "^21.2.0",
     "wait-on": "^7.0.0"

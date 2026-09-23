@@ -10,6 +10,7 @@ const Login = () => {
   const [password, setPassword] = React.useState('')
   const [error, setError] = React.useState(null)
   const [loading, setLoading] = React.useState(false)
+  const [locked, setLocked] = React.useState(false)
   const [localIp, setLocalIp] = React.useState(null)
 
   React.useEffect(() => {
@@ -49,7 +50,7 @@ const Login = () => {
     const host = window.location.host || 'localhost:3000'
 
     if (host.includes('localhost') || host.includes('127.0.0.1')) {
-      return `http://192.168.1.216:3000/#/`
+      return `http://192.168.1.128:3000/#/`
     }
 
     return `http://${host}/#/`
@@ -92,6 +93,21 @@ const Login = () => {
     setError(null)
     setLoading(true)
 
+    // check locked state for this email
+    try {
+      const attemptsJson = localStorage.getItem('loginAttempts') || '{}'
+      const attempts = JSON.parse(attemptsJson || '{}')
+      const count = attempts[email?.toLowerCase()] || 0
+      if (count >= 3) {
+        setLocked(true)
+        setError('Contul blocat local: contactează CEO sau Admin pentru resetare parolă.')
+        setLoading(false)
+        return
+      }
+    } catch (err) {
+      // ignore parse errors
+    }
+
     try {
       // Call new serverless login endpoint
       const resp = await fetch('/api/auth/login', {
@@ -106,12 +122,35 @@ const Login = () => {
       if (body.access_token) localStorage.setItem('access_token', body.access_token)
       const user = body.user
       if (!user) throw new Error('Missing user data')
+      // on success, reset local attempt counter for this email
+      try {
+        const attemptsJson = localStorage.getItem('loginAttempts') || '{}'
+        const attempts = JSON.parse(attemptsJson || '{}')
+        delete attempts[email?.toLowerCase()]
+        localStorage.setItem('loginAttempts', JSON.stringify(attempts))
+      } catch (e) {}
       if (user.role === 'ceo') navigate('/CEODashboard')
       else if (user.role === 'admin') navigate('/AdminDashboard')
       else if (user.role === 'employee') navigate('/EmployeeDashboard')
       else navigate('/')
     } catch (err) {
       setError(err.message || 'Failed to login')
+      // increment local attempts counter for this email
+      try {
+        const key = email?.toLowerCase()
+        if (key) {
+          const attemptsJson = localStorage.getItem('loginAttempts') || '{}'
+          const attempts = JSON.parse(attemptsJson || '{}')
+          attempts[key] = (attempts[key] || 0) + 1
+          localStorage.setItem('loginAttempts', JSON.stringify(attempts))
+          if (attempts[key] >= 3) {
+            setLocked(true)
+            setError('Ai introdus parola greșit de 3 ori. Contactează CEO sau Admin pentru resetare parolă.')
+          }
+        }
+      } catch (e) {
+        console.warn('Failed to update login attempts', e)
+      }
     } finally {
       setLoading(false)
     }

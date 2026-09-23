@@ -346,19 +346,23 @@ export async function generateAndDownloadPdf(pdfData) {
 
    
 
-    // Replace any template page-2 text with a blank page, then render a clean summary.
-    while (pdfDoc.getPageCount() > 1) pdfDoc.removePage(1)
-    const secondPage = pdfDoc.addPage([width, height])
-    const { height: h2 } = secondPage.getSize()
-    const jobNameText = normalizeScalar(pdfData.jobName ?? pdfData.job_name)
+    // Keep all template pages. Fill total value on page 2 at the blank position.
     const totalValueRaw = pdfData.totalValue != null ? pdfData.totalValue : pdfData.total_value
     const totalValueText = totalValueRaw != null && totalValueRaw !== '' && !Number.isNaN(parseFloat(totalValueRaw))
       ? `${parseFloat(totalValueRaw).toFixed(2)} lei`
       : ''
 
-    safeDrawText(secondPage, 'Detalii job', { x: 75, y: h2 - 70, size: defaultFontSize + 1 }, h2 - 70)
-    safeDrawText(secondPage, `Job: ${jobNameText}`, { x: 75, y: h2 - 100, size: defaultFontSize }, h2 - 100)
-    if (totalValueText) safeDrawText(secondPage, `Valoare job: ${totalValueText}`, { x: 75, y: h2 - 125, size: defaultFontSize }, h2 - 125)
+    if (pages.length >= 2 && totalValueText) {
+      const page2 = pages[1]
+      // "Valoarea totala a serviciilor este de ___________" at x=75.984, y=287.21 on page 2
+      const valPrefix = 'Valoarea totala a serviciilor este de '
+      const valX = 75.984 + helvetica.widthOfTextAtSize(valPrefix, 9.96) + 18
+      const valY = 287.21
+      // White out the underscores
+      page2.drawRectangle({ x: valX - 1, y: valY - 2, width: 145, height: 13, color: rgb(1, 1, 1) })
+      // Write the value
+      safeDrawText(page2, totalValueText, { x: valX, y: valY, size: 10 }, valY)
+    }
 
     const uint8Array = await pdfDoc.save()
     const blob = new Blob([uint8Array], { type: 'application/pdf' })

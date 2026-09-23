@@ -165,6 +165,31 @@ module.exports = async (req, res) => {
         if (body.completers) console.log('[tasks:update] SQL:', sql, 'PARAMS:', [...vals, whereValue])
         const { rows } = await client.query(sql, [...vals, whereValue])
         if (!rows.length) return res.status(404).json({ error: 'Not found' })
+        const updatedTask = rows[0]
+        // Auto-complete job when all its tasks are completed
+        if (updatedTask && updatedTask.status === 'completed' && updatedTask.job_id) {
+          try {
+            const { rows: rem } = await client.query(
+              `SELECT COUNT(*) AS c FROM public.tasks WHERE job_id = $1 AND status <> 'completed'`,
+              [updatedTask.job_id]
+            )
+            if (parseInt(rem[0].c, 10) === 0) {
+              await client.query(
+                `UPDATE public.jobs SET status = 'completed', completed_at = NOW() WHERE id = $1 AND (status IS NULL OR status <> 'completed')`,
+                [updatedTask.job_id]
+              )
+            }
+          } catch (autoErr) { console.warn('[tasks:patch] auto-complete job failed:', autoErr.message) }
+        }
+        // Auto-reopen job if a task is un-completed
+        if (updatedTask && updatedTask.status !== 'completed' && updatedTask.job_id) {
+          try {
+            await client.query(
+              `UPDATE public.jobs SET status = 'todo', completed_at = NULL WHERE id = $1 AND status = 'completed'`,
+              [updatedTask.job_id]
+            )
+          } catch (autoErr) { console.warn('[tasks:patch] auto-reopen job failed:', autoErr.message) }
+        }
         return res.json({ data: rows })
       })
     }

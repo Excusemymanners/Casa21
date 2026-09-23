@@ -2,7 +2,15 @@ import React, { useEffect, useState } from 'react'
 import supabase from '../supabase-client'
 import { sendJobCompletionEmail, sendTaskCompletionEmail, areAllTasksCompleted } from '../emailService'
 import './EmployeeDashboard.css'
+import './DashboardSidebar.css'
 import { useNavigate } from 'react-router-dom'
+
+const CATEGORY_LABELS = {
+  cadastru_sporadic:   'Cadastru Sporadic',
+  cadastru_sistematic: 'Cadastru Sistematic',
+  topografie:          'Topografie',
+  administrativ:       'Administrativ',
+}
 
 const EmployeeDashboard = () => {
   const navigate = useNavigate()
@@ -15,57 +23,40 @@ const EmployeeDashboard = () => {
   const [error, setError] = useState(null)
   const [message, setMessage] = useState(null)
 
-  // Stare pentru job expandat
-  const [expandedJob, setExpandedJob] = useState(null)
+  const [activeSection, setActiveSection] = useState('home')
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false)
+  const [selectedJobId, setSelectedJobId] = useState(null)
+  const [previousSection, setPreviousSection] = useState('lucrari')
 
-  // Stare pentru task expandat
   const [expandedTask, setExpandedTask] = useState(null)
-  // Stare pentru dropdown-ul de "mai mult" (overflow) din fiecare task
-  const [overflowTask, setOverflowTask] = useState(null)
-  // Stare pentru meniul de actiuni task (pe mobil)
-  const [taskMenuOpen, setTaskMenuOpen] = useState(null)
   const [isMobile, setIsMobile] = useState(typeof window !== 'undefined' ? window.innerWidth < 700 : false)
 
-  // Stare calendar
-  const [showCalendar, setShowCalendar] = useState(false)
   const [currentMonth, setCurrentMonth] = useState(new Date())
   const [selectedDate, setSelectedDate] = useState(null)
-
-  const handleLogout = () => {
-    try { localStorage.removeItem('access_token') } catch (e) {}
-    navigate('/')
-    setTimeout(() => window.location.reload(), 50)
-  }
 
   useEffect(() => {
     const onResize = () => setIsMobile(window.innerWidth < 700)
     window.addEventListener('resize', onResize)
     return () => window.removeEventListener('resize', onResize)
   }, [])
+
   useEffect(() => {
     const getUser = async () => {
       const { data: { user: u } } = await supabase.auth.getUser()
       setUser(u)
       if (u) {
-        // Găsește profilul utilizatorului curent după email, nu după id-ul auth
-        const { data: profile } = await supabase
-          .from('profiles')
-          .select('*')
-          .eq('email', u.email)
-          .single()
-
-        const profileRow = profile || null
-        setUserProfile(profileRow || { id: u.id, email: u.email, full_name: u.email?.split('@')?.[0] || 'Employee', role: 'employee' })
+        const { data: profile } = await supabase.from('profiles').select('*').eq('email', u.email).single()
+        setUserProfile(profile || { id: u.id, email: u.email, full_name: u.email?.split('@')?.[0] || 'Utilizator', role: 'employee' })
       }
     }
     getUser()
   }, [])
 
-
   useEffect(() => {
-    if (userProfile) {
-      fetchData()
-    }
+    if (!userProfile) return
+    fetchData()
+    const interval = setInterval(fetchData, 2 * 60 * 1000)
+    return () => clearInterval(interval)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userProfile])
 
@@ -78,703 +69,472 @@ const EmployeeDashboard = () => {
         supabase.from('tasks').select('*').order('created_at', { ascending: true }),
         supabase.from('profiles').select('id, email, full_name, role, created_at')
       ])
-      
-      console.log('🔧 Jobs Response:', jobsRes)
-      console.log('🔧 Tasks Response:', tasksRes)
-      
-      if (jobsRes.error) {
-        console.error('❌ Jobs Error:', jobsRes.error)
-        throw jobsRes.error
-      }
-      if (tasksRes.error) {
-        console.error('❌ Tasks Error:', tasksRes.error)
-        throw tasksRes.error
-      }
-      if (profilesRes.error) {
-        console.error('❌ Profiles Error:', profilesRes.error)
-        throw profilesRes.error
-      }
-
-      console.log('👤 User Profile Email:', userProfile?.email)
-      console.log('📋 All Tasks:', tasksRes.data)
-      console.log('🔍 Tasks assigned_to_email values:', tasksRes.data?.map(t => ({ id: t.id, name: t.name, assigned_to_email: t.assigned_to_email })))
+      if (jobsRes.error) throw jobsRes.error
+      if (tasksRes.error) throw tasksRes.error
+      if (profilesRes.error) throw profilesRes.error
 
       const profilesData = profilesRes.data || []
-
-      // Normalize tasks: support both array columns and legacy scalar columns
       const allTasks = (tasksRes.data || []).map(t => {
         const assigned = Array.isArray(t.assigned_to) ? t.assigned_to : (t.assigned_to ? [t.assigned_to] : [])
         const assignedEmails = Array.isArray(t.assigned_to_emails)
           ? t.assigned_to_emails
-          : (t.assigned_to_email ? [t.assigned_to_email] : assigned.map(pid => (profilesData.find(p => p.id === pid) || {}).email).filter(Boolean))
+          : assigned.map(pid => (profilesData.find(p => p.id === pid) || {}).email).filter(Boolean)
         return { ...t, assigned_to: assigned, assigned_to_emails: assignedEmails }
-      })
+      }).sort((a, b) => (a.created_at ? new Date(a.created_at).getTime() : 0) - (b.created_at ? new Date(b.created_at).getTime() : 0))
 
-      // Ensure a stable creation order: sort all tasks by created_at ascending
-      allTasks.sort((a, b) => {
-        const ta = a.created_at ? new Date(a.created_at).getTime() : 0
-        const tb = b.created_at ? new Date(b.created_at).getTime() : 0
-        return ta - tb
-      })
+      const myEmail = userProfile?.email
+      const myId = userProfile?.id
 
-      // FILTRARE PENTRU EMPLOYEE:
-      // 1. Găsește joburile unde are taskuri asignate SAU taskuri neasignate
       const myRelevantJobIds = [...new Set(
         allTasks
-          .filter(t => (t.assigned_to_emails && t.assigned_to_emails.includes(userProfile?.email)) || (t.assigned_to_emails && t.assigned_to_emails.length === 0))
+          .filter(t => {
+            const assigned = Array.isArray(t.assigned_to) ? t.assigned_to : []
+            const emails = Array.isArray(t.assigned_to_emails) ? t.assigned_to_emails : []
+            return assigned.includes(myId) || emails.includes(myEmail) || (emails.length === 0 && assigned.length === 0)
+          })
           .map(t => t.job_id)
       )]
-      
-      console.log('🔑 My Relevant Job IDs:', myRelevantJobIds)
-      
-      // 2. Afișează acele joburi
-      const myJobs = (jobsRes.data || []).filter(j => myRelevantJobIds.includes(j.id))
-      
-      // 3. Afișează TOATE taskurile din acele joburi (nu doar cele asignate lui)
-      // Keep tasks in creation order for employee view
-      const myJobTasks = allTasks.filter(t => myRelevantJobIds.includes(t.job_id))
 
-      // As a safety, sort tasks for the job by creation time (ascending)
-      myJobTasks.sort((a, b) => {
-        const ta = a.created_at ? new Date(a.created_at).getTime() : 0
-        const tb = b.created_at ? new Date(b.created_at).getTime() : 0
-        return ta - tb
-      })
-      
-      console.log('📁 My Jobs:', myJobs.map(j => ({ id: j.id, name: j.name })))
-      console.log('📋 All Tasks from DB:', allTasks.length)
-      console.log('� Tasks in My Jobs:', myJobTasks.length)
-      console.log('📋 Task details in My Jobs:', myJobTasks.map(t => ({ 
-        name: t.name, 
-        job_id: t.job_id, 
-        assigned: t.assigned_to_email,
-        isInRelevantJob: myRelevantJobIds.includes(t.job_id)
-      })))
+      const myJobs = (jobsRes.data || []).filter(j => myRelevantJobIds.includes(j.id))
+      const myJobTasks = allTasks.filter(t => myRelevantJobIds.includes(t.job_id))
+        .sort((a, b) => (a.created_at ? new Date(a.created_at).getTime() : 0) - (b.created_at ? new Date(b.created_at).getTime() : 0))
 
       setJobs(myJobs)
       setTasks(myJobTasks)
-      setProfiles(profilesData || [])
+      setProfiles(profilesData)
     } catch (err) {
-      console.error(err)
       setError(err.message || 'Eroare la încărcare date')
     } finally {
       setLoading(false)
     }
   }
 
-  // Helper pentru formatare utilizator
   const displayUserLabel = (profile) => {
     if (!profile) return '(Neasignat)'
     return profile.full_name ? `${profile.full_name} (${profile.email})` : profile.email
   }
 
-  // Helper pentru durata estimată
-  const formatDuration = (hours) => {
-    if (!hours || hours <= 0) return '0h'
-    const days = Math.floor(hours / 8)
-    const remainingHours = hours % 8
-    const minutes = Math.round((remainingHours % 1) * 60)
-    const wholeHours = Math.floor(remainingHours)
-    
-    let result = ''
-    if (days > 0) result += `${days}z `
-    if (wholeHours > 0) result += `${wholeHours}h `
-    if (minutes > 0) result += `${minutes}m`
-    return result.trim() || '0h'
+  const toggleComplete = async (task) => {
+    const assignedEmails = Array.isArray(task.assigned_to_emails) ? task.assigned_to_emails : []
+    const assignedIds = Array.isArray(task.assigned_to) ? task.assigned_to : []
+    const canComplete = assignedEmails.length === 0 || assignedEmails.includes(userProfile?.email) || assignedIds.includes(userProfile?.id)
+    if (!canComplete) { setMessage('Nu poți completa acest task — este asignat altcuiva!'); setTimeout(() => setMessage(null), 3000); return }
+    if (task.status === 'completed') return
+    try {
+      setLoading(true)
+      const token = localStorage.getItem('access_token')
+      const resp = await fetch('/api/tasks/complete', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: token ? `Bearer ${token}` : '' }, body: JSON.stringify({ id: task.id }) })
+      const body = await resp.json()
+      if (!resp.ok) throw new Error(body.error || 'Failed to complete task')
+      const updatedTask = body.data
+      const updatedTasks = tasks.map(t => t.id === task.id ? updatedTask : t)
+        .sort((a, b) => (a.created_at ? new Date(a.created_at).getTime() : 0) - (b.created_at ? new Date(b.created_at).getTime() : 0))
+      setTasks(updatedTasks)
+      // Refresh job from server — server auto-marks it completed when all tasks done
+      try {
+        const { data: freshJob } = await supabase.from('jobs').select().eq('id', task.job_id)
+        if (freshJob && freshJob[0]) setJobs(prev => prev.map(j => j.id === task.job_id ? { ...j, ...freshJob[0] } : j))
+      } catch (e) { console.warn('job refresh failed', e) }
+      const job = jobs.find(j => j.id === task.job_id)
+      if (job?.client_email) {
+        try {
+          await sendTaskCompletionEmail({ to: job.client_email, clientName: job.client_name, jobName: job.name, taskName: task.name, taskDescription: task.description, taskValue: task.value, completedAt: updatedTask.completed_at })
+          if (areAllTasksCompleted(updatedTasks, task.job_id)) {
+            const totalValue = updatedTasks.filter(t => t.job_id === task.job_id).reduce((s, t) => s + (parseFloat(t.value) || 0), 0)
+            await sendJobCompletionEmail({ to: job.client_email, clientName: job.client_name, jobName: job.name, tasks: updatedTasks.filter(t => t.job_id === task.job_id), totalValue, completedAt: new Date().toISOString(), clientCNP: job.client_cnp, clientSeries: job.client_id_series, clientAddress: job.client_address })
+          }
+        } catch (e) { console.warn(e) }
+      }
+      setMessage('Task completat!'); setTimeout(() => setMessage(null), 3000)
+    } catch (err) {
+      setError(err.message || 'Eroare la completare task')
+    } finally { setLoading(false) }
+  }
+
+  const getDaysInMonth = (date) => {
+    const year = date.getFullYear(); const month = date.getMonth()
+    const firstDay = new Date(year, month, 1); const lastDay = new Date(year, month + 1, 0)
+    return { daysInMonth: lastDay.getDate(), startingDayOfWeek: firstDay.getDay(), year, month }
   }
 
   const calculateEstimatedDate = (hours) => {
     if (!hours || hours <= 0) return null
-    const now = new Date()
-    let workingHours = hours
-    let currentDate = new Date(now)
-
-    while (workingHours > 0) {
-      const dayOfWeek = currentDate.getDay()
-      if (dayOfWeek !== 0 && dayOfWeek !== 6) {
-        workingHours -= 8
-        if (workingHours <= 0) break
-      }
-      currentDate.setDate(currentDate.getDate() + 1)
-    }
-    return currentDate
-  }
-
-  const formatEstimatedDate = (hours) => {
-    const date = calculateEstimatedDate(hours)
-    if (!date) return ''
-    return date.toLocaleDateString('ro-RO', { year: 'numeric', month: 'long', day: 'numeric' })
-  }
-
-  const toggleComplete = async (task) => {
-    const assignedEmails = task.assigned_to_emails || []
-    const canComplete = assignedEmails.length === 0 || assignedEmails.includes(userProfile?.email)
-
-    if (!canComplete) {
-      setMessage('⚠️ Nu poți completa acest task - este asignat altcuiva!')
-      setTimeout(() => setMessage(null), 3000)
-      return
-    }
-
-    if (task.status === 'completed') return
-
-    try {
-      setLoading(true)
-      const token = localStorage.getItem('access_token')
-      const resp = await fetch('/api/tasks/complete', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: token ? `Bearer ${token}` : '' },
-        body: JSON.stringify({ id: task.id })
-      })
-      const body = await resp.json()
-      if (!resp.ok) throw new Error(body.error || 'Failed to complete task')
-
-      const updatedTask = body.data
-      const updatedTasks = tasks.map(t => t.id === task.id ? updatedTask : t)
-      updatedTasks.sort((a, b) => {
-        const ta = a.created_at ? new Date(a.created_at).getTime() : 0
-        const tb = b.created_at ? new Date(b.created_at).getTime() : 0
-        return ta - tb
-      })
-      setTasks(updatedTasks)
-
-      const job = jobs.find(j => j.id === task.job_id)
-      if (job) {
-        await sendTaskCompletionEmail({
-          to: job.client_email,
-          clientName: job.client_name,
-          jobName: job.name,
-          taskName: task.name,
-          taskDescription: task.description,
-          taskValue: task.value,
-          completedAt: updatedTask.completed_at
-        })
-
-        if (areAllTasksCompleted(updatedTasks, task.job_id)) {
-          const totalValue = updatedTasks
-            .filter(t => t.job_id === task.job_id)
-            .reduce((s, t) => s + (parseFloat(t.value) || 0), 0)
-          await sendJobCompletionEmail({
-            to: job.client_email,
-            clientName: job.client_name,
-            jobName: job.name,
-            tasks: updatedTasks.filter(t => t.job_id === task.job_id),
-            totalValue,
-            completedAt: new Date().toISOString(),
-            clientCNP: job.client_cnp,
-            clientSeries: job.client_id_series,
-            clientAddress: job.client_address
-          })
-        }
-      }
-
-      setMessage('✅ Task completat cu succes!')
-      setTimeout(() => setMessage(null), 3000)
-    } catch (err) {
-      console.error('Complete task error', err)
-      setError(err.message || 'Eroare la completare task')
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  // Funcții calendar
-  const getDaysInMonth = (date) => {
-    const year = date.getFullYear()
-    const month = date.getMonth()
-    const firstDay = new Date(year, month, 1)
-    const lastDay = new Date(year, month + 1, 0)
-    const daysInMonth = lastDay.getDate()
-    const startingDayOfWeek = firstDay.getDay()
-    
-    return { daysInMonth, startingDayOfWeek, year, month }
+    let wh = hours; let d = new Date()
+    while (wh > 0) { const dow = d.getDay(); if (dow !== 0 && dow !== 6) wh -= 8; if (wh > 0) d.setDate(d.getDate() + 1) }
+    return d
   }
 
   const getTasksForDate = (date) => {
-    const dateStr = date.toISOString().split('T')[0]
-    // Afișează TOATE taskurile din joburile relevante (unde are taskuri asignate sau neasignate)
-    const myRelevantJobIds = [...new Set(
-      tasks
-        .filter(t => {
-          const emails = Array.isArray(t.assigned_to_emails) ? t.assigned_to_emails : (t.assigned_to_email ? [t.assigned_to_email] : [])
-          return emails.includes(userProfile?.email) || emails.length === 0
-        })
-        .map(t => t.job_id)
-    )]
-    
+    const ds = date.toISOString().split('T')[0]
+    const myEmail = userProfile?.email; const myId = userProfile?.id
+    const myTaskIds = new Set(tasks.filter(t => {
+      const a = Array.isArray(t.assigned_to) ? t.assigned_to : []
+      const ae = Array.isArray(t.assigned_to_emails) ? t.assigned_to_emails : []
+      return a.includes(myId) || ae.includes(myEmail)
+    }).map(t => t.id))
     return tasks.filter(task => {
-      // Verifică dacă taskul este din joburile relevante
-      if (!myRelevantJobIds.includes(task.job_id)) return false
-      
-      if (task.completed_at) {
-        const completedDate = new Date(task.completed_at).toISOString().split('T')[0]
-        if (completedDate === dateStr) return true
-      }
-      if (task.created_at) {
-        const createdDate = new Date(task.created_at).toISOString().split('T')[0]
-        if (createdDate === dateStr) return true
-      }
-      if (task.estimated_hours) {
-        const estimatedDate = calculateEstimatedDate(task.estimated_hours)
-        if (estimatedDate && estimatedDate.toISOString().split('T')[0] === dateStr) return true
-      }
+      if (!myTaskIds.has(task.id)) return false
+      if (task.completed_at && new Date(task.completed_at).toISOString().split('T')[0] === ds) return true
+      if (task.deadline && new Date(task.deadline).toISOString().split('T')[0] === ds) return true
+      if (task.estimated_hours) { const ed = calculateEstimatedDate(task.estimated_hours); if (ed && ed.toISOString().split('T')[0] === ds) return true }
       return false
     })
   }
 
-  const getJobsForDate = (date) => {
-    const dateStr = date.toISOString().split('T')[0]
-    // Afișează doar joburile care au taskuri asignate utilizatorului sau neasignate
-    const myRelevantJobIds = [...new Set(
-      tasks
-        .filter(t => {
-          const emails = Array.isArray(t.assigned_to_emails) ? t.assigned_to_emails : (t.assigned_to_email ? [t.assigned_to_email] : [])
-          return emails.includes(userProfile?.email) || emails.length === 0
-        })
-        .map(t => t.job_id)
-    )]
-    
-    return jobs.filter(job => {
-      // Verifică dacă jobul are taskuri relevante
-      if (!myRelevantJobIds.includes(job.id)) return false
-      
-      if (job.completed_at) {
-        const completedDate = new Date(job.completed_at).toISOString().split('T')[0]
-        if (completedDate === dateStr) return true
-      }
-      if (job.created_at) {
-        const createdDate = new Date(job.created_at).toISOString().split('T')[0]
-        if (createdDate === dateStr) return true
-      }
-      return false
-    })
+  const hasEventsOnDate = (date) => getTasksForDate(date).length > 0
+
+  const handleLogout = () => {
+    try { localStorage.removeItem('access_token') } catch (e) {}
+    navigate('/'); setTimeout(() => window.location.reload(), 50)
   }
 
-  const hasEventsOnDate = (date) => {
-    return getTasksForDate(date).length > 0 || getJobsForDate(date).length > 0
+  const activeJobs = jobs.filter(j => j.status !== 'completed')
+  const completedJobs = jobs.filter(j => j.status === 'completed')
+
+  const navItem = (section, icon, label, sub = false) => (
+    <button
+      key={section}
+      className={`sidebar-nav-item${activeSection === section || (section !== 'home' && activeSection.startsWith(section + '/') && !sub) ? ' active' : ''}`}
+      onClick={() => { setActiveSection(section); setMobileSidebarOpen(false) }}
+    >
+      <span className="sidebar-nav-icon">{icon}</span>
+      <span className="sidebar-nav-label">{label}</span>
+    </button>
+  )
+
+  const dlBadge = (deadline, compact = false) => {
+    if (!deadline) return null
+    const d = new Date(deadline), now = new Date()
+    const days = Math.ceil((d - now) / 86400000)
+    let bg, color, label
+    if (days < 0)       { bg = '#fde8e8'; color = '#c62828'; label = compact ? `Expirat ${Math.abs(days)}z` : `⚠ Expirat acum ${Math.abs(days)} ${Math.abs(days)===1?'zi':'zile'}` }
+    else if (days === 0){ bg = '#fff3e0'; color = '#e65100'; label = compact ? 'Azi!' : '⏰ Scade azi!' }
+    else if (days <= 3) { bg = '#fff3e0'; color = '#e65100'; label = compact ? `${days}z` : `📅 ${d.toLocaleDateString('ro-RO')} (${days} ${days===1?'zi':'zile'})` }
+    else if (days <= 7) { bg = '#fffde7'; color = '#f57f17'; label = compact ? `${days}z` : `📅 ${d.toLocaleDateString('ro-RO')} (${days} zile)` }
+    else                { bg = '#e8f5e9'; color = '#2e7d32'; label = compact ? d.toLocaleDateString('ro-RO') : `📅 ${d.toLocaleDateString('ro-RO')}` }
+    return <span style={{ display:'inline-block', background: bg, color, padding: compact ? '2px 7px' : '3px 9px', borderRadius: 6, fontSize: compact ? 11 : 12, fontWeight: 600, whiteSpace: 'nowrap' }}>{label}</span>
   }
 
-  const navigateMonth = (direction) => {
-    setCurrentMonth(prev => {
-      const newDate = new Date(prev)
-      newDate.setMonth(newDate.getMonth() + direction)
-      return newDate
-    })
-  }
-
-  const renderCalendar = () => {
-    const { daysInMonth, startingDayOfWeek, year, month } = getDaysInMonth(currentMonth)
-    const monthNames = ['Ianuarie', 'Februarie', 'Martie', 'Aprilie', 'Mai', 'Iunie', 'Iulie', 'August', 'Septembrie', 'Octombrie', 'Noiembrie', 'Decembrie']
-    const dayNames = ['Dum', 'Lun', 'Mar', 'Mie', 'Joi', 'Vin', 'Sâm']
-    
-    const days = []
-    for (let i = 0; i < startingDayOfWeek; i++) {
-      days.push(<div key={`empty-${i}`} style={{ padding: 8 }}></div>)
-    }
-    
-    for (let day = 1; day <= daysInMonth; day++) {
-      const date = new Date(year, month, day)
-      const hasEvents = hasEventsOnDate(date)
-      const isToday = new Date().toDateString() === date.toDateString()
-      const isSelected = selectedDate && selectedDate.toDateString() === date.toDateString()
-      
-      days.push(
-        <div
-          key={`day-${day}`}
-          style={{
-            padding: 16,
-            textAlign: 'center',
-            cursor: 'pointer',
-            backgroundColor: isSelected ? '#2196F3' : isToday ? '#e3f2fd' : hasEvents ? '#fff3e0' : 'transparent',
-            color: isSelected ? 'white' : isToday ? '#1976d2' : 'black',
-            fontWeight: isToday || hasEvents ? 'bold' : 'normal',
-            fontSize: 16,
-            borderRadius: 8,
-            position: 'relative',
-            border: hasEvents ? '3px solid #ff9800' : isToday ? '3px solid #2196F3' : '1px solid #eee',
-            minHeight: 50,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center'
-          }}
-          onClick={() => setSelectedDate(date)}
-        >
-          {day}
-          {hasEvents && !isSelected && (
-            <div style={{
-              position: 'absolute',
-              bottom: 4,
-              left: '50%',
-              transform: 'translateX(-50%)',
-              width: 8,
-              height: 8,
-              backgroundColor: '#ff9800',
-              borderRadius: '50%'
-            }}></div>
-          )}
-        </div>
-      )
-    }
-    
+  const renderHome = () => {
+    const myEmail = userProfile?.email; const myId = userProfile?.id
+    const myTasksCount = tasks.filter(t => {
+      const a = Array.isArray(t.assigned_to) ? t.assigned_to : []
+      const ae = Array.isArray(t.assigned_to_emails) ? t.assigned_to_emails : []
+      return (a.includes(myId) || ae.includes(myEmail)) && t.status !== 'completed'
+    }).length
+    const items = [
+      { section: 'profil', icon: '👤', label: 'Profil', count: myTasksCount },
+      { section: 'lucrari', icon: '📁', label: 'Toate Lucrările', count: activeJobs.length },
+      { section: 'lucrari/cadastru_sporadic', icon: '📍', label: 'Cadastru Sporadic', count: activeJobs.filter(j => j.category === 'cadastru_sporadic').length },
+      { section: 'lucrari/cadastru_sistematic', icon: '🗺️', label: 'Cadastru Sistematic', count: activeJobs.filter(j => j.category === 'cadastru_sistematic').length },
+      { section: 'lucrari/topografie', icon: '⛰️', label: 'Topografie', count: activeJobs.filter(j => j.category === 'topografie').length },
+      { section: 'lucrari_finalizate', icon: '✅', label: 'Lucrări Finalizate', count: completedJobs.length },
+      { section: 'administrativ', icon: '📋', label: 'Administrativ', count: activeJobs.filter(j => j.category === 'administrativ').length },
+      { section: 'calendar', icon: '📅', label: 'Calendar', count: null },
+    ]
     return (
-      <div style={{
-        position: 'fixed',
-        top: 0,
-        left: 0,
-        right: 0,
-        bottom: 0,
-        backgroundColor: 'rgba(0, 0, 0, 0.5)',
-        display: 'flex',
-        justifyContent: 'center',
-        alignItems: 'center',
-        zIndex: 9999
-      }}>
-        <div style={{
-          backgroundColor: 'white',
-          border: '3px solid #2196F3',
-          borderRadius: 12,
-          padding: 24,
-          boxShadow: '0 8px 32px rgba(0,0,0,0.3)',
-          maxWidth: 600,
-          width: '90%',
-          maxHeight: '90vh',
-          overflow: 'auto'
-        }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
-            <button onClick={() => navigateMonth(-1)} style={{ fontSize: 20, padding: '8px 16px' }}>◀ Prev</button>
-            <h2 style={{ margin: 0, fontSize: 24, color: '#2196F3' }}>{monthNames[month]} {year}</h2>
-            <button onClick={() => navigateMonth(1)} style={{ fontSize: 20, padding: '8px 16px' }}>Next ▶</button>
-          </div>
-          
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 8, marginBottom: 12 }}>
-            {dayNames.map(name => (
-              <div key={name} style={{ textAlign: 'center', fontWeight: 'bold', fontSize: 14, padding: 8, color: '#666' }}>
-                {name}
-              </div>
-            ))}
-          </div>
-          
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 8 }}>
-            {days}
-          </div>
-          
-          {selectedDate && (
-            <div style={{ marginTop: 24, borderTop: '2px solid #ddd', paddingTop: 20 }}>
-              <h3 style={{ margin: '0 0 12px 0', color: '#2196F3', fontSize: 18 }}>
-                📅 {selectedDate.toLocaleDateString('ro-RO', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}
-              </h3>
-              
-              {getJobsForDate(selectedDate).length > 0 && (
-                <div style={{ marginBottom: 16 }}>
-                  <strong style={{ fontSize: 16 }}>📋 Jobs ({getJobsForDate(selectedDate).length}):</strong>
-                  {getJobsForDate(selectedDate).map(job => (
-                    <div key={job.id} style={{ fontSize: 14, marginLeft: 12, padding: 8, backgroundColor: '#f5f5f5', borderRadius: 6, marginTop: 6, border: '1px solid #ddd' }}>
-                      • {job.name} - {job.client_name}
-                    </div>
-                  ))}
-                </div>
-              )}
-              
-              {getTasksForDate(selectedDate).length > 0 && (
-                <div>
-                  <strong style={{ fontSize: 16 }}>✅ Tasks ({getTasksForDate(selectedDate).length}):</strong>
-                  {getTasksForDate(selectedDate).map(task => {
-                    const job = jobs.find(j => j.id === task.job_id)
-                    return (
-                      <div key={task.id} style={{ fontSize: 14, marginLeft: 12, padding: 8, backgroundColor: task.status === 'completed' ? '#e8f5e9' : '#fff3e0', borderRadius: 6, marginTop: 6, border: '1px solid #ddd' }}>
-                        • {task.name} {job && `(${job.name})`} - <strong>{task.status}</strong>
-                      </div>
-                    )
-                  })}
-                </div>
-              )}
-              
-              {getJobsForDate(selectedDate).length === 0 && getTasksForDate(selectedDate).length === 0 && (
-                <p style={{ fontSize: 14, color: '#999', margin: 0, fontStyle: 'italic' }}>Nu sunt evenimente în această zi.</p>
-              )}
+      <div>
+        <p className="home-welcome">Bună ziua, {userProfile?.full_name || user?.email}!</p>
+        <p className="home-subtitle">Selectează o secțiune pentru a continua.</p>
+        <div className="home-grid">
+          {items.map(item => (
+            <div key={item.section} className="home-card" onClick={() => setActiveSection(item.section)}>
+              <div className="home-card-icon">{item.icon}</div>
+              <div className="home-card-label">{item.label}</div>
+              {item.count !== null && <div className="home-card-count">{item.count} {item.count === 1 ? 'element' : 'elemente'}</div>}
             </div>
-          )}
-          
-          <button 
-            onClick={() => { setShowCalendar(false); setSelectedDate(null) }} 
-            style={{ 
-              marginTop: 24, 
-              width: '100%', 
-              padding: '12px', 
-              fontSize: 16, 
-              backgroundColor: '#f44336', 
-              color: 'white', 
-              border: 'none', 
-              borderRadius: 8, 
-              cursor: 'pointer',
-              fontWeight: 'bold'
-            }}
-          >
-            ❌ Închide Calendar
-          </button>
+          ))}
         </div>
       </div>
     )
   }
 
-  const downloadPdfForJob = async (job) => {
-    try {
-      let assignedOrder = null
-      try {
-        const rpcRes = await supabase.rpc('assign_job_order', { p_job_id: job.id })
-        if (rpcRes && rpcRes.data != null) {
-          if (Array.isArray(rpcRes.data)) assignedOrder = rpcRes.data[0]
-          else assignedOrder = rpcRes.data
-        }
-      } catch (rpcErr) {
-        console.warn('assign_job_order RPC failed', rpcErr)
-      }
+  const renderProfil = () => {
+    const myEmail = userProfile?.email; const myId = userProfile?.id
+    const myTasks = tasks.filter(t => {
+      const a = Array.isArray(t.assigned_to) ? t.assigned_to : []
+      const ae = Array.isArray(t.assigned_to_emails) ? t.assigned_to_emails : []
+      return a.includes(myId) || ae.includes(myEmail)
+    }).sort((a, b) => {
+      if (a.deadline && b.deadline) return new Date(a.deadline) - new Date(b.deadline)
+      if (a.deadline) return -1; if (b.deadline) return 1; return 0
+    })
+    return (
+      <div>
+        <div className="section-header"><h2 className="section-title">👤 Profil</h2></div>
+        <div className="profile-card">
+          <div className="profile-avatar">{(userProfile?.full_name || user?.email || 'A').charAt(0).toUpperCase()}</div>
+          <div>
+            <div className="profile-name">{userProfile?.full_name || user?.email}</div>
+            <div className="profile-email">{user?.email}</div>
+            <div className="profile-role">Colaborator</div>
+          </div>
+        </div>
+        <h3 style={{ marginBottom: 12, color: '#333' }}>Taskurile mele ({myTasks.length})</h3>
+        {myTasks.length === 0 ? <p style={{ color: '#6b7280' }}>Nu ai taskuri asignate momentan.</p> : myTasks.map(task => {
+          const job = jobs.find(j => j.id === task.job_id)
+          const isOverdue = task.deadline && new Date(task.deadline) < new Date() && task.status !== 'completed'
+          return (
+            <div key={task.id} className={`task-item-profil${task.status === 'completed' ? ' completed' : ''}${isOverdue ? ' overdue' : ''}`}
+              onClick={() => job && (setPreviousSection('profil'), setSelectedJobId(job.id), setActiveSection('job_detail'))}
+              style={{ cursor: job ? 'pointer' : 'default' }}
+            >
+              <div style={{ flex: 1 }}>
+                <div style={{ fontWeight: 600, fontSize: 14 }}>{task.name}</div>
+                {job && <div style={{ fontSize: 12, color: '#1976d2', marginTop: 2 }}>📁 {job.name}</div>}
+                {job?.client_name && <div style={{ fontSize: 12, color: '#555', marginTop: 1 }}>👤 <strong>{job.client_name}</strong></div>}
+                {task.description && <div style={{ fontSize: 12, color: '#777', marginTop: 3 }}>{task.description}</div>}
+              </div>
+              <div style={{ textAlign: 'right', flexShrink: 0, display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 5 }}>
+                {task.deadline && <div style={{ marginBottom: 2 }}>{dlBadge(task.deadline)}</div>}
+                <div style={{ fontSize: 11, padding: '2px 7px', borderRadius: 8, background: task.status === 'completed' ? '#e8f5e9' : task.status === 'stand_by' ? '#e3f2fd' : '#fff3e0', color: task.status === 'completed' ? '#2e7d32' : task.status === 'stand_by' ? '#1565c0' : '#e65100', fontWeight: 600 }}>{task.status === 'completed' ? 'Finalizat' : task.status === 'stand_by' ? 'Stand By' : 'În lucru'}</div>
+                {task.status !== 'completed' && (
+                  <button onClick={e => { e.stopPropagation(); toggleComplete(task) }} style={{ fontSize: 11, padding: '3px 8px', background: '#4caf50', color: 'white', border: 'none', borderRadius: 5, cursor: 'pointer' }}>✅ Finalizez</button>
+                )}
+              </div>
+            </div>
+          )
+        })}
+      </div>
+    )
+  }
 
-      const jobTasks = tasks.filter(t => t.job_id === job.id).sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
-      const totalValue = (jobTasks || []).reduce((s, t) => s + (parseFloat(t.value) || 0), 0)
-      const pdfData = {
-        template: 'blank',
-        clientName: job.client_name,
-        clientCNP: job.client_cnp || null,
-        clientSeries: job.client_id_series || null,
-        clientAddress: job.client_address || null,
-        clientEmail: job.client_email || null,
-        jobName: job.name,
-        tasks: jobTasks,
-        totalValue,
-        completedAt: job.completed_at || new Date().toISOString(),
-        receptionNumber: job.reception_number || job.receptionNumber || null,
-        orderNumber: assignedOrder != null ? assignedOrder : (job.order_number || null)
-      }
-      const { generateAndDownloadPdf } = await import('../utils/generatePdfClient')
-      const res = await generateAndDownloadPdf(pdfData)
-      if (!res || !res.ok) {
-        setError(res && res.error ? res.error : 'Eroare generare PDF')
-      }
-    } catch (err) {
-      console.error('downloadPdfForJob error', err)
-      setError(err.message || 'Eroare la descarcare PDF')
+  const renderJobList = (filteredJobs) => {
+    return (
+      <div>
+        {filteredJobs.length === 0 && <p style={{ color: '#6b7280', fontSize: 14 }}>Nu sunt lucrări în această categorie.</p>}
+        {filteredJobs.map((job, idx) => {
+          const jobTasks = tasks.filter(t => t.job_id === job.id)
+          const completedCount = jobTasks.filter(t => t.status === 'completed').length
+          const myEmail = userProfile?.email; const myId = userProfile?.id
+          const myTasksInJob = jobTasks.filter(t => {
+            const a = Array.isArray(t.assigned_to) ? t.assigned_to : []
+            const ae = Array.isArray(t.assigned_to_emails) ? t.assigned_to_emails : []
+            return a.includes(myId) || ae.includes(myEmail) || (a.length === 0 && ae.length === 0)
+          })
+          const earliestDeadline = myTasksInJob.filter(t => t.deadline && t.status !== 'completed').sort((a, b) => new Date(a.deadline) - new Date(b.deadline))[0]
+            || jobTasks.filter(t => t.deadline && t.status !== 'completed').sort((a, b) => new Date(a.deadline) - new Date(b.deadline))[0]
+
+          return (
+            <div
+              key={job.id}
+              className="job-card"
+              onClick={() => { setPreviousSection(activeSection); setSelectedJobId(job.id); setActiveSection('job_detail') }}
+              style={{ marginBottom: 10, padding: '14px 16px', border: '1px solid #e5e7eb', borderRadius: 10, background: job.status === 'completed' ? '#f0fdf4' : 'white', boxShadow: '0 1px 4px rgba(0,0,0,0.06)', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 12 }}
+              onMouseEnter={e => { e.currentTarget.style.boxShadow = '0 4px 12px rgba(0,0,0,0.12)'; e.currentTarget.style.borderColor = '#93c5fd' }}
+              onMouseLeave={e => { e.currentTarget.style.boxShadow = '0 1px 4px rgba(0,0,0,0.06)'; e.currentTarget.style.borderColor = '#e5e7eb' }}
+            >
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 4 }}>
+                  <span style={{ fontSize: 15 }}>{idx + 1}. {job.name}</span>
+                  <span style={{ padding: '2px 8px', borderRadius: 5, fontSize: 11, color: 'white', background: job.priority === 'urgent' ? '#f44336' : job.priority === 'repede' ? '#ff9800' : '#607d8b' }}>{job.priority || 'normal'}</span>
+                  {job.category && <span style={{ padding: '2px 8px', borderRadius: 5, fontSize: 11, color: '#555', background: '#e3f2fd' }}>{CATEGORY_LABELS[job.category] || job.category}</span>}
+                  <strong style={{ color: '#333', fontSize: 13 }}>— {job.client_name}</strong>
+                </div>
+                <div style={{ fontSize: 12, color: '#555', display: 'flex', gap: 14, flexWrap: 'wrap', alignItems: 'center' }}>
+                  <span style={{ color: '#6b7280' }}>{completedCount}/{jobTasks.length} taskuri</span>
+                  {myTasksInJob.length > 0 && <span style={{ background: '#e8f5e9', color: '#2e7d32', padding: '2px 7px', borderRadius: 8, fontSize: 11, fontWeight: 600 }}>{myTasksInJob.filter(t => t.status !== 'completed').length} taskuri ale mele</span>}
+                  {earliestDeadline && dlBadge(earliestDeadline.deadline)}
+                </div>
+              </div>
+              <span style={{ color: '#9ca3af', fontSize: 20, flexShrink: 0 }}>›</span>
+            </div>
+          )
+        })}
+      </div>
+    )
+  }
+
+  const renderJobDetail = () => {
+    const job = jobs.find(j => j.id === selectedJobId)
+    const myEmail = userProfile?.email; const myId = userProfile?.id
+    if (!job) return (
+      <div>
+        <button onClick={() => setActiveSection(previousSection)} style={{ padding: '7px 14px', background: '#374151', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13, marginBottom: 16 }}>← Înapoi</button>
+        <p>Lucrarea nu a fost găsită.</p>
+      </div>
+    )
+    const jobTasks = tasks.filter(t => t.job_id === job.id).sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
+
+    return (
+      <div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 20 }}>
+          <button onClick={() => setActiveSection(previousSection)} style={{ padding: '7px 14px', background: '#374151', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13, fontWeight: 600 }}>← Înapoi</button>
+          <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700, color: '#1a1a2e' }}>{job.name}</h2>
+          <span style={{ padding: '2px 8px', borderRadius: 5, fontSize: 11, color: 'white', background: job.priority === 'urgent' ? '#f44336' : job.priority === 'repede' ? '#ff9800' : '#607d8b' }}>{job.priority || 'normal'}</span>
+          {job.status === 'completed' && <span style={{ padding: '3px 8px', borderRadius: 5, fontSize: 11, color: 'white', background: '#4caf50' }}>Finalizat</span>}
+        </div>
+
+        <div style={{ background: 'white', borderRadius: 10, padding: 18, border: '1px solid #e5e7eb', marginBottom: 16, boxShadow: '0 1px 4px rgba(0,0,0,0.06)' }}>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
+            {job.order_number && <span style={{ padding: '2px 8px', borderRadius: 5, fontSize: 11, color: 'white', background: '#2196f3' }}>Nr. {job.order_number}</span>}
+            {job.category && <span style={{ padding: '2px 8px', borderRadius: 5, fontSize: 11, color: '#555', background: '#e3f2fd' }}>{CATEGORY_LABELS[job.category] || job.category}</span>}
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 12, fontSize: 13 }}>
+            <div><div style={{ color: '#888', fontSize: 11, marginBottom: 2 }}>Client</div><div style={{ fontWeight: 600 }}>{job.client_name || 'N/A'}</div></div>
+            <div><div style={{ color: '#888', fontSize: 11, marginBottom: 2 }}>Email</div><div>{job.client_email || 'N/A'}</div></div>
+            <div><div style={{ color: '#888', fontSize: 11, marginBottom: 2 }}>Telefon</div><div>{job.client_phone || 'N/A'}</div></div>
+            <div><div style={{ color: '#888', fontSize: 11, marginBottom: 2 }}>Creat la</div><div>{new Date(job.created_at).toLocaleString('ro-RO')}</div></div>
+          </div>
+        </div>
+
+        <div style={{ background: 'white', borderRadius: 10, padding: 18, border: '1px solid #e5e7eb', boxShadow: '0 1px 4px rgba(0,0,0,0.06)' }}>
+          <h3 style={{ margin: '0 0 14px', fontSize: 15, color: '#1a1a2e' }}>Taskuri ({jobTasks.length})</h3>
+          {jobTasks.length === 0 && <p style={{ fontSize: 13, color: '#6b7280' }}>Nu sunt taskuri la această lucrare.</p>}
+          {jobTasks.map(task => {
+            const isTaskExpanded = expandedTask === task.id
+            const assignedProfiles = (profiles || []).filter(p => Array.isArray(task.assigned_to) ? task.assigned_to.includes(p.id) : task.assigned_to === p.id)
+            const isMyTask = (Array.isArray(task.assigned_to) ? task.assigned_to.includes(myId) : false)
+              || (Array.isArray(task.assigned_to_emails) ? task.assigned_to_emails.includes(myEmail) : false)
+            const canComplete = isMyTask || (task.assigned_to?.length === 0 && task.assigned_to_emails?.length === 0)
+            const isOverdue = task.deadline && new Date(task.deadline) < new Date() && task.status !== 'completed'
+
+            return (
+              <div key={task.id} style={{ marginBottom: 8, padding: '10px 12px', border: `1px solid ${isMyTask ? '#a5d6a7' : '#e5e7eb'}`, borderRadius: 7, background: task.status === 'completed' ? '#f0fdf4' : (isOverdue ? '#fff8f8' : 'white') }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8, flexWrap: 'wrap' }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                      <strong style={{ fontSize: 14 }}>{task.name}</strong>
+                      {isMyTask && <span style={{ fontSize: 10, background: '#e8f5e9', color: '#2e7d32', padding: '1px 6px', borderRadius: 8, fontWeight: 700 }}>al meu</span>}
+                      {isOverdue && <span style={{ fontSize: 10, background: '#ffebee', color: '#c62828', padding: '1px 6px', borderRadius: 8, fontWeight: 700 }}>depășit</span>}
+                      <span style={{ fontSize: 11, padding: '2px 6px', borderRadius: 4, background: task.status === 'completed' ? '#e8f5e9' : task.status === 'stand_by' ? '#e3f2fd' : '#fff3e0', color: task.status === 'completed' ? '#2e7d32' : task.status === 'stand_by' ? '#1565c0' : '#e65100', fontWeight: 600 }}>{task.status === 'completed' ? 'Finalizat' : task.status === 'stand_by' ? 'Stand By' : 'În lucru'}</span>
+                    </div>
+                    <div style={{ fontSize: 12, color: '#666', marginTop: 4 }}>
+                      <span>Asignat: {assignedProfiles.length > 0 ? assignedProfiles.map(p => displayUserLabel(p)).join(', ') : '(Toată echipa)'}</span>
+                      {task.value != null && <span> | 💰 {parseFloat(task.value).toFixed(2)} lei</span>}
+                      {task.deadline && <span style={{ marginLeft: 6 }}>{dlBadge(task.deadline, true)}</span>}
+                    </div>
+                    {task.description && <div style={{ fontSize: 12, color: '#777', marginTop: 4 }}>{task.description}</div>}
+                    {isTaskExpanded && (
+                      <div style={{ marginTop: 8, fontSize: 12, color: '#555', paddingTop: 8, borderTop: '1px solid #eee' }}>
+                        {task.deadline && <div>Deadline: {new Date(task.deadline).toLocaleString('ro-RO')}</div>}
+                        {task.completed_at && <div style={{ marginTop: 4 }}>Finalizat la: {new Date(task.completed_at).toLocaleString('ro-RO')}</div>}
+                        {(Array.isArray(task.completers) && task.completers.length > 0) && <div style={{ marginTop: 4 }}>Finalizat de: {task.completers.map((c, i) => { const p = (profiles || []).find(p => p.id === c.id || (c.email && p.email && p.email.toLowerCase() === c.email.toLowerCase())); const l = p ? displayUserLabel(p) : (c.email || c.id); return `${l}${c.amount != null ? ` (${parseFloat(c.amount).toFixed(2)} lei)` : ''}${i < task.completers.length - 1 ? ', ' : ''}` }).join('')}</div>}
+                        <div style={{ marginTop: 4 }}>Creat la: {new Date(task.created_at).toLocaleString('ro-RO')}</div>
+                      </div>
+                    )}
+                  </div>
+                  <div style={{ display: 'flex', gap: 5, alignItems: 'center', flexShrink: 0 }}>
+                    <button onClick={() => setExpandedTask(isTaskExpanded ? null : task.id)} style={{ fontSize: 11, padding: '4px 8px', background: '#f3f4f6', border: '1px solid #e5e7eb', borderRadius: 5, cursor: 'pointer', color: '#374151' }}>{isTaskExpanded ? '▲' : '▼'}</button>
+                    {canComplete && task.status !== 'completed' && (
+                      <button onClick={() => toggleComplete(task)} style={{ fontSize: 11, padding: '4px 10px', background: '#4caf50', color: 'white', border: 'none', borderRadius: 5, cursor: 'pointer', fontWeight: 600 }}>✅ Finalizez</button>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      </div>
+    )
+  }
+
+  const renderSection = (filteredJobs, title, icon) => (
+    <div>
+      <div className="section-header"><h2 className="section-title">{icon} {title} <span style={{ fontSize: 14, fontWeight: 400, color: '#777' }}>({filteredJobs.length})</span></h2></div>
+      {renderJobList(filteredJobs)}
+    </div>
+  )
+
+  const renderCalendar = () => {
+    const { daysInMonth, startingDayOfWeek, year, month } = getDaysInMonth(currentMonth)
+    const monthNames = ['Ianuarie','Februarie','Martie','Aprilie','Mai','Iunie','Iulie','August','Septembrie','Octombrie','Noiembrie','Decembrie']
+    const dayNames = ['Dum','Lun','Mar','Mie','Joi','Vin','Sâm']
+    const days = []
+    for (let i = 0; i < startingDayOfWeek; i++) days.push(<div key={`e-${i}`} style={{ padding: 8 }} />)
+    for (let day = 1; day <= daysInMonth; day++) {
+      const date = new Date(year, month, day)
+      const hasEvents = hasEventsOnDate(date)
+      const isToday = new Date().toDateString() === date.toDateString()
+      const isSelected = selectedDate && selectedDate.toDateString() === date.toDateString()
+      days.push(
+        <div key={day} onClick={() => setSelectedDate(date)} style={{ padding: 12, textAlign: 'center', cursor: 'pointer', background: isSelected ? '#2196f3' : isToday ? '#e3f2fd' : hasEvents ? '#fff3e0' : 'transparent', color: isSelected ? 'white' : isToday ? '#1565c0' : 'black', fontWeight: isToday || hasEvents ? 700 : 400, borderRadius: 7, border: hasEvents ? '2px solid #ff9800' : isToday ? '2px solid #2196f3' : '1px solid #eee', position: 'relative', minHeight: 44, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 14 }}>
+          {day}
+          {hasEvents && !isSelected && <div style={{ position: 'absolute', bottom: 3, left: '50%', transform: 'translateX(-50%)', width: 6, height: 6, background: '#ff9800', borderRadius: '50%' }} />}
+        </div>
+      )
     }
+    return (
+      <div>
+        <div className="section-header"><h2 className="section-title">📅 Calendar</h2></div>
+        <div className="calendar-inline">
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+            <button onClick={() => setCurrentMonth(prev => { const d = new Date(prev); d.setMonth(d.getMonth() - 1); return d })} style={{ padding: '7px 14px', border: 'none', borderRadius: 6, cursor: 'pointer', background: '#374151', color: '#fff', fontWeight: 600 }}>◀ Prev</button>
+            <h3 style={{ margin: 0, color: '#2196f3' }}>{monthNames[month]} {year}</h3>
+            <button onClick={() => setCurrentMonth(prev => { const d = new Date(prev); d.setMonth(d.getMonth() + 1); return d })} style={{ padding: '7px 14px', border: 'none', borderRadius: 6, cursor: 'pointer', background: '#374151', color: '#fff', fontWeight: 600 }}>Next ▶</button>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7,1fr)', gap: 6, marginBottom: 8 }}>
+            {dayNames.map(n => <div key={n} style={{ textAlign: 'center', fontWeight: 700, fontSize: 12, padding: 6, color: '#777' }}>{n}</div>)}
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7,1fr)', gap: 6 }}>{days}</div>
+          {selectedDate && (
+            <div style={{ marginTop: 20, borderTop: '2px solid #eee', paddingTop: 16 }}>
+              <h4 style={{ margin: '0 0 10px', color: '#2196f3' }}>📅 {selectedDate.toLocaleDateString('ro-RO', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}</h4>
+              {getTasksForDate(selectedDate).length > 0
+                ? <div>{getTasksForDate(selectedDate).map(t => { const j = jobs.find(jj => jj.id === t.job_id); return <div key={t.id} style={{ fontSize: 13, marginLeft: 12, padding: '5px 8px', background: t.status === 'completed' ? '#e8f5e9' : t.status === 'stand_by' ? '#e3f2fd' : '#fff3e0', borderRadius: 5, marginTop: 4 }}>• {t.name} {j && `(${j.name})`} - <strong>{t.status === 'completed' ? 'Finalizat' : t.status === 'stand_by' ? 'Stand By' : 'În lucru'}</strong></div> })}</div>
+                : <p style={{ color: '#6b7280', fontStyle: 'italic', fontSize: 13 }}>Nu sunt taskuri asignate în această zi.</p>
+              }
+            </div>
+          )}
+        </div>
+      </div>
+    )
   }
 
   return (
-    <div className="dashboard-container">
-      <div className="dashboard-header" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
-        <div>
-          <h1>Employee Dashboard</h1>
-          <p>Bine ai venit, <strong>{userProfile?.full_name || userProfile?.email || 'Employee'}</strong>!</p>
+    <div className="app-layout">
+      <aside className="app-sidebar">
+        <div className="sidebar-logo" onClick={() => setActiveSection('home')} role="button" tabIndex={0} onKeyDown={e => e.key === 'Enter' && setActiveSection('home')}>
+          <img src="/Sigla.svg" alt="Overview" />
+          <span className="sidebar-logo-text">Overview</span>
         </div>
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-          <button onClick={() => setShowCalendar(s => !s)} className="btn btn-success">
-            📅 Calendar
-          </button>
-          <button onClick={handleLogout} className="btn btn-outline-danger">
-            🚪 Logout
-          </button>
+
+        <nav className={`sidebar-nav${mobileSidebarOpen ? ' mobile-open' : ''}`}>
+          {navItem('home', '🏠', 'Acasă')}
+          {navItem('profil', '👤', 'Profil')}
+          <div>
+            {navItem('lucrari', '📁', 'Lucrări')}
+            <div className="sidebar-subnav">
+              {navItem('lucrari/cadastru_sporadic', '📍', 'Cadastru Sporadic', true)}
+              {navItem('lucrari/cadastru_sistematic', '🗺️', 'Cadastru Sistematic', true)}
+              {navItem('lucrari/topografie', '⛰️', 'Topografie', true)}
+              {navItem('administrativ', '📋', 'Administrativ', true)}
+            </div>
+          </div>
+          {navItem('lucrari_finalizate', '✅', 'Lucrări Finalizate')}
+          {navItem('calendar', '📅', 'Calendar')}
+        </nav>
+
+        <div className="sidebar-footer">
+          <div className="sidebar-user-name">{userProfile?.full_name || user?.email || 'Utilizator'}</div>
+          <div className="sidebar-user-role">Colaborator</div>
+          <button className="sidebar-logout-btn" onClick={handleLogout}>🚪 Ieși din cont</button>
         </div>
-        {showCalendar && renderCalendar()}
-      </div>
+      </aside>
 
-      <div className="mb-16">
-        <button onClick={fetchData} className="btn btn-secondary btn-small">🔄 Reîmprospătează taskuri</button>
-      </div>
+      <main className="app-main">
+        {loading && <div style={{ fontSize: 13, color: '#888', marginBottom: 12 }}>Se încarcă...</div>}
+        {error && <div className="dash-alert dash-alert-error">{error}<button onClick={() => setError(null)}>✕</button></div>}
+        {message && <div className="dash-alert dash-alert-success">{message}<button onClick={() => setMessage(null)}>✕</button></div>}
 
-      {loading && <p>Loading...</p>}
-      {error && <p style={{ color: 'red' }}>Error: {error}</p>}
-      {message && <p style={{ color: 'green' }}>{message}</p>}
-
-      <section>
-        <h3>Joburile mele ({jobs.length})</h3>
-        {jobs.length === 0 ? (
-          <p style={{ color: '#999' }}>Nu ai taskuri asignate momentan.</p>
-        ) : (
-          jobs.map((job, idx) => {
-            const jobTasks = tasks.filter(t => t.job_id === job.id).sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
-            console.log(`📊 Job "${job.name}" (${job.id}):`)
-            console.log('  - Tasks in state:', tasks.length)
-            console.log('  - Tasks for this job:', jobTasks.length)
-            console.log('  - Task details:', jobTasks.map(t => ({ name: t.name, job_id: t.job_id, assigned: t.assigned_to_emails })))
-            
-            const totalHours = jobTasks.reduce((sum, t) => sum + (parseFloat(t.estimated_hours) || 0), 0)
-            const isExpanded = expandedJob === job.id
-
-            return (
-              <div key={job.id} style={{ marginBottom: 16, padding: 12, border: '1px solid #ccc', borderRadius: 8 }}>
-                {!isMobile ? (
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                    <div>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                            <strong>📁 {idx + 1}. {job.name}</strong>
-                            {job.order_number && <span style={{ padding: '4px 8px', borderRadius: 6, fontSize: 12, color: 'white', backgroundColor: '#2196F3' }}>Nr. {job.order_number}</span>}
-                            <span> - {job.client_name} ({job.status})</span>
-                          </div>
-                          
-                          <div style={{ fontSize: 12, color: '#333' }}>💰 Valoare job: {job.total_value != null ? parseFloat(job.total_value).toFixed(2) + ' lei' : 'N/A'}</div>
-                          <div style={{ fontSize: 12, color: '#4CAF50', fontWeight: 'bold' }}>💵 Bani încasați: {job.amount_paid != null ? parseFloat(job.amount_paid).toFixed(2) + ' lei' : '0.00 lei'}</div>
-                      <div style={{ fontSize: 11, color: '#666' }}>
-                        ⏱️ Timp estimat: <strong>{formatDuration(totalHours)}</strong>
-                        {(() => {
-                          const earliestDeadline = jobTasks.filter(t => t.deadline).sort((a, b) => new Date(a.deadline) - new Date(b.deadline))[0];
-                          return earliestDeadline ? ` → Termen limită: ${new Date(earliestDeadline.deadline).toLocaleDateString('ro-RO', { year: 'numeric', month: 'long', day: 'numeric' })}` : '';
-                        })()}
-                      </div>
-                    </div>
-                    <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-                      <button onClick={() => setExpandedJob(isExpanded ? null : job.id)} style={{ fontSize: 12 }}>
-                        {isExpanded ? '🔼 Ascunde' : '🔽 Detalii'}
-                      </button>
-                      <button onClick={() => downloadPdfForJob(job)} style={{ fontSize: 12 }}>📄 Descarcă PDF</button>
-                    </div>
-                  </div>
-                ) : (
-                  <button
-                    onClick={() => setExpandedJob(isExpanded ? null : job.id)}
-                    style={{ width: '100%', textAlign: 'left', padding: '12px 14px', borderRadius: 10, border: '1px solid #d0d7de', background: '#f8fafc', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 8 }}
-                  >
-                    <span style={{ minWidth: 0 }}>
-                      <strong style={{ display: 'block' }}>📁 {idx + 1}. {job.name}</strong>
-                      <span style={{ display: 'block', fontSize: 12, color: '#555' }}>{job.client_name} ({job.status})</span>
-                    </span>
-                    <span>{isExpanded ? '▲' : '▼'}</span>
-                  </button>
-                )}
-
-                {isExpanded && (
-                  <div style={{ marginTop: 8, paddingLeft: 16, borderLeft: '3px solid #4CAF50' }}>
-                    {isMobile && (
-                      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
-                        <button onClick={() => downloadPdfForJob(job)} style={{ fontSize: 12 }}>📄 Descarcă PDF</button>
-                        <button onClick={() => setExpandedJob(null)} style={{ fontSize: 12 }}>🔼 Ascunde</button>
-                      </div>
-                    )}
-                    <div style={{ fontSize: 12, color: '#555', marginBottom: 8 }}>
-                      <div>Client: {job.client_name}</div>
-                      <div>Email Client: {job.client_email || 'N/A'}</div>
-                      <div>Created at: {new Date(job.created_at).toLocaleString('ro-RO')}</div>
-                    </div>
-
-                    <h4 style={{ fontSize: 14, marginBottom: 8 }}>Taskuri ({jobTasks.length})</h4>
-                    {jobTasks.length === 0 ? (
-                      <p style={{ fontSize: 12, color: '#999' }}>Nu sunt taskuri în acest job.</p>
-                    ) : (
-                      jobTasks.map(task => {
-                      const isTaskExpanded = expandedTask === task.id
-                      const assignedProfiles = (profiles || []).filter(p => Array.isArray(task.assigned_to) ? task.assigned_to.includes(p.id) : task.assigned_to === p.id)
-                      const assignedLabels = assignedProfiles.length > 0 ? assignedProfiles.map(p => (p.full_name ? `${p.full_name} (${p.email})` : p.email)).join(', ') : '(Neasignat)'
-                      const assignedEmails = task.assigned_to_emails || []
-                      const canCompleteTask = assignedEmails.length === 0 || assignedEmails.includes(userProfile?.email)
-
-                      return (
-                        <div key={task.id} style={{ marginBottom: 8, padding: 8, border: '1px solid #ddd', borderRadius: 4, backgroundColor: task.status === 'completed' ? '#e8f5e9' : 'white' }}>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                            <div style={{ flex: 1 }}>
-                              <div style={{ fontWeight: 'bold', fontSize: 13 }}>{task.name}</div>
-                              <div style={{ fontSize: 11, color: '#666' }}>
-                                Status: <strong>{task.status}</strong> | Asignat: {assignedLabels}
-                                {task.estimated_hours && (
-                                  <span> | ⏱️ {formatDuration(task.estimated_hours)}{task.deadline ? ` → Termen: ${new Date(task.deadline).toLocaleDateString('ro-RO', { year: 'numeric', month: 'long', day: 'numeric' })}` : ''}</span>
-                                )}
-                              </div>
-                            </div>
-                            <div style={{ position: 'relative' }}>
-                              {!isMobile ? (
-                                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                                  <button onClick={() => setExpandedTask(isTaskExpanded ? null : task.id)} style={{ fontSize: 11 }}>
-                                    {isTaskExpanded ? '🔼' : '🔽'}
-                                  </button>
-                                  {task.status !== 'completed' && canCompleteTask && (
-                                    <button onClick={() => toggleComplete(task)} style={{ fontSize: 11 }}>
-                                      ✅ Done
-                                    </button>
-                                  )}
-                                  {task.status !== 'completed' && !canCompleteTask && (
-                                    <span style={{ fontSize: 11, color: '#999', fontStyle: 'italic', padding: '4px 8px' }}>
-                                      🔒 Altcuiva
-                                    </span>
-                                  )}
-                                  {task.status === 'completed' && (
-                                    <span style={{ fontSize: 11, color: '#4CAF50', fontWeight: 'bold', padding: '4px 8px' }}>
-                                      ✅ Completat
-                                    </span>
-                                  )}
-                                </div>
-                              ) : (
-                                <div>
-                                  <button onClick={() => setTaskMenuOpen(taskMenuOpen === task.id ? null : task.id)} style={{ fontSize: 16, padding: '6px 8px' }}>⋮</button>
-                                  {taskMenuOpen === task.id && (
-                                    <div style={{ position: 'absolute', right: 0, top: 32, background: 'white', border: '1px solid #ddd', borderRadius: 8, boxShadow: '0 6px 18px rgba(0,0,0,0.12)', zIndex: 60, minWidth: 160, padding: 8 }}>
-                                      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                                        <button onClick={() => { setExpandedTask(isTaskExpanded ? null : task.id); setTaskMenuOpen(null) }} style={{ textAlign: 'left' }}>{isTaskExpanded ? 'Ascunde detalii' : 'Vezi detalii'}</button>
-                                        {task.status !== 'completed' && canCompleteTask && (
-                                          <button onClick={() => { toggleComplete(task); setTaskMenuOpen(null) }} style={{ textAlign: 'left' }}>✅ Marchează ca Done</button>
-                                        )}
-                                        <button onClick={() => { setOverflowTask(overflowTask === task.id ? null : task.id); setTaskMenuOpen(null) }} style={{ textAlign: 'left' }}>{overflowTask === task.id ? 'Mai puțin' : 'Mai mult'}</button>
-                                      </div>
-                                    </div>
-                                  )}
-                                </div>
-                              )}
-                            </div>
-                          </div>
-
-                          {isTaskExpanded && (
-                              <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px solid #eee', fontSize: 12, color: '#555' }}>
-                                <div><strong>Descriere:</strong> <span className="task-desc">{task.description || 'N/A'}</span></div>
-                                <div style={{ marginTop: 6, display: 'flex', gap: 8, alignItems: 'center' }}>
-                                  {/* Primary quick actions */}
-                                  {task.status !== 'completed' && canCompleteTask && (
-                                    <button onClick={() => toggleComplete(task)} style={{ fontSize: 12 }}>✅ Done</button>
-                                  )}
-                                  {task.status === 'completed' && (
-                                    <span style={{ fontSize: 12, color: '#4CAF50', fontWeight: 'bold' }}>✅ Completat</span>
-                                  )}
-
-                                  {/* Overflow toggle: arată restul detaliilor fără a forța layout orizontal */}
-                                  <button onClick={() => setOverflowTask(overflowTask === task.id ? null : task.id)} style={{ fontSize: 12 }}>
-                                    {overflowTask === task.id ? '▲ Mai puțin' : '⋯ Mai mult'}
-                                  </button>
-                                </div>
-
-                                {/* Overflow panel - conținut detaliat, derulabil dacă e lung */}
-                                {overflowTask === task.id && (
-                                  <div style={{ marginTop: 8, padding: 8, border: '1px solid var(--border-color)', borderRadius: 8, background: '#fafafa', maxHeight: 220, overflow: 'auto' }}>
-                                    {((task.completers && task.completers.length > 0) || task.completed_by) && (
-                                      <div style={{ marginTop: 4 }}>
-                                        <strong>Completat de:</strong>{' '}
-                                        {(() => {
-                                          const list = Array.isArray(task.completers) && task.completers.length > 0 ? task.completers : (task.completed_by ? [{ id: task.completed_by, email: task.completed_by_email }] : [])
-                                          return list.map((c, idx) => {
-                                            const prof = (profiles || []).find(p => p.id === c.id)
-                                            const label = prof ? displayUserLabel(prof) : (c.email || c.id)
-                                            return `${label}${c.amount != null ? ` (${c.amount} lei)` : ''}${idx < list.length - 1 ? ', ' : ''}`
-                                          }).join('')
-                                        })()}
-                                      </div>
-                                    )}
-
-                                    {task.completed_at && (
-                                      <div style={{ marginTop: 8 }}>
-                                        <strong>Completat la:</strong> {new Date(task.completed_at).toLocaleString('ro-RO')}
-                                      </div>
-                                    )}
-
-                                    <div style={{ marginTop: 8 }}>
-                                      <strong>Creat la:</strong> {new Date(task.created_at).toLocaleString('ro-RO')}
-                                    </div>
-                                  </div>
-                                )}
-                              </div>
-                          )}
-                        </div>
-                      )
-                    }))}
-                  </div>
-                )}
-              </div>
-            )
-          })
+        {activeSection === 'home' && renderHome()}
+        {activeSection === 'profil' && renderProfil()}
+        {activeSection === 'lucrari' && renderSection(activeJobs, 'Toate Lucrările', '📁')}
+        {activeSection === 'lucrari/cadastru_sporadic' && renderSection(activeJobs.filter(j => j.category === 'cadastru_sporadic'), 'Cadastru Sporadic', '📍')}
+        {activeSection === 'lucrari/cadastru_sistematic' && renderSection(activeJobs.filter(j => j.category === 'cadastru_sistematic'), 'Cadastru Sistematic', '🗺️')}
+        {activeSection === 'lucrari/topografie' && renderSection(activeJobs.filter(j => j.category === 'topografie'), 'Topografie', '⛰️')}
+        {activeSection === 'lucrari_finalizate' && (
+          <div>
+            <div className="section-header"><h2 className="section-title">✅ Lucrări Finalizate <span style={{ fontSize: 14, fontWeight: 400, color: '#777' }}>({completedJobs.length})</span></h2></div>
+            {renderJobList(completedJobs)}
+          </div>
         )}
-      </section>
+        {activeSection === 'administrativ' && renderSection(activeJobs.filter(j => j.category === 'administrativ'), 'Administrativ', '📋')}
+        {activeSection === 'calendar' && renderCalendar()}
+        {activeSection === 'job_detail' && renderJobDetail()}
+      </main>
+
+      <button className="sidebar-mobile-toggle" onClick={() => setMobileSidebarOpen(s => !s)} style={{ display: isMobile ? 'flex' : 'none' }}>☰</button>
     </div>
   )
 }
