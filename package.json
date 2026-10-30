@@ -43,8 +43,7 @@
     "build": "react-scripts build && node postbuild.js",
     "electron-pack": "npm run build && electron-builder --win --publish never",
     "test": "react-scripts test",
-    "eject": "react-scripts eject",
-    "check-deadlines": "node scripts/check-deadlines.js"
+    "eject": "react-scripts eject"
   },
   "main": "electron-main.js",
   "devDependencies": {

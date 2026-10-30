@@ -56,6 +56,11 @@ Password: admin
 - Verifica dacă alt app rulează pe port 3000
 - SAU: Deschide Task Manager și ucide procesul "node"
 
+### Pe alte calculatoare: "This site can't be reached" / "took too long to respond"
+- Windows Firewall de pe PC-ul cu aplicația blochează portul 3000
+- Rulează `ALLOW-FIREWALL.bat` (cere singur drepturi de Administrator) — deschide portul 3000 pe toate profilurile de rețea
+- `RUN-APP-LOCAL.bat` verifică singur regula la fiecare pornire și o creează dacă lipsește
+
 ## 📱 Acces de pe Telefon/Tablă
 
 Pe același WiFi:

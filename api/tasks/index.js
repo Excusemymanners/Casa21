@@ -165,7 +165,18 @@ module.exports = async (req, res) => {
         if (body.completers) console.log('[tasks:update] SQL:', sql, 'PARAMS:', [...vals, whereValue])
         const { rows } = await client.query(sql, [...vals, whereValue])
         if (!rows.length) return res.status(404).json({ error: 'Not found' })
-        const updatedTask = rows[0]
+        let updatedTask = rows[0]
+        // Value changed on an already-completed task -> re-split the amount between its completers
+        if (updatedTask && Object.prototype.hasOwnProperty.call(body, 'value') && !Object.prototype.hasOwnProperty.call(body, 'completers')) {
+          const completers = Array.isArray(updatedTask.completers) ? updatedTask.completers : []
+          if (completers.length > 0) {
+            const value = updatedTask.value != null ? parseFloat(updatedTask.value) : null
+            const share = value != null ? parseFloat((value / completers.length).toFixed(2)) : null
+            const resplit = completers.map(c => ({ ...c, amount: share }))
+            const { rows: r2 } = await client.query('UPDATE public.tasks SET completers = $1::jsonb WHERE id = $2 RETURNING *', [JSON.stringify(resplit), updatedTask.id])
+            if (r2.length) { updatedTask = r2[0]; rows[0] = r2[0] }
+          }
+        }
         // Auto-complete job when all its tasks are completed
         if (updatedTask && updatedTask.status === 'completed' && updatedTask.job_id) {
           try {

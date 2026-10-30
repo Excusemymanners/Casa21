@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import supabase from '../supabase-client'
-import { sendJobCompletionEmail, sendTaskCompletionEmail, areAllTasksCompleted } from '../emailService'
+import TaskExplorer from './TaskExplorer'
+import JobExplorer from './JobExplorer'
 import './EmployeeDashboard.css'
 import './DashboardSidebar.css'
 import { useNavigate } from 'react-router-dom'
@@ -135,16 +136,6 @@ const EmployeeDashboard = () => {
         const { data: freshJob } = await supabase.from('jobs').select().eq('id', task.job_id)
         if (freshJob && freshJob[0]) setJobs(prev => prev.map(j => j.id === task.job_id ? { ...j, ...freshJob[0] } : j))
       } catch (e) { console.warn('job refresh failed', e) }
-      const job = jobs.find(j => j.id === task.job_id)
-      if (job?.client_email) {
-        try {
-          await sendTaskCompletionEmail({ to: job.client_email, clientName: job.client_name, jobName: job.name, taskName: task.name, taskDescription: task.description, taskValue: task.value, completedAt: updatedTask.completed_at })
-          if (areAllTasksCompleted(updatedTasks, task.job_id)) {
-            const totalValue = updatedTasks.filter(t => t.job_id === task.job_id).reduce((s, t) => s + (parseFloat(t.value) || 0), 0)
-            await sendJobCompletionEmail({ to: job.client_email, clientName: job.client_name, jobName: job.name, tasks: updatedTasks.filter(t => t.job_id === task.job_id), totalValue, completedAt: new Date().toISOString(), clientCNP: job.client_cnp, clientSeries: job.client_id_series, clientAddress: job.client_address })
-          }
-        } catch (e) { console.warn(e) }
-      }
       setMessage('Task completat!'); setTimeout(() => setMessage(null), 3000)
     } catch (err) {
       setError(err.message || 'Eroare la completare task')
@@ -220,7 +211,7 @@ const EmployeeDashboard = () => {
     const myTasksCount = tasks.filter(t => {
       const a = Array.isArray(t.assigned_to) ? t.assigned_to : []
       const ae = Array.isArray(t.assigned_to_emails) ? t.assigned_to_emails : []
-      return (a.includes(myId) || ae.includes(myEmail)) && t.status !== 'completed'
+      return (a.includes(myId) || ae.includes(myEmail)) && t.status !== 'completed' && jobs.find(j => j.id === t.job_id)?.status !== 'completed'
     }).length
     const items = [
       { section: 'profil', icon: '👤', label: 'Profil', count: myTasksCount },
@@ -271,30 +262,10 @@ const EmployeeDashboard = () => {
           </div>
         </div>
         <h3 style={{ marginBottom: 12, color: '#333' }}>Taskurile mele ({myTasks.length})</h3>
-        {myTasks.length === 0 ? <p style={{ color: '#6b7280' }}>Nu ai taskuri asignate momentan.</p> : myTasks.map(task => {
-          const job = jobs.find(j => j.id === task.job_id)
-          const isOverdue = task.deadline && new Date(task.deadline) < new Date() && task.status !== 'completed'
-          return (
-            <div key={task.id} className={`task-item-profil${task.status === 'completed' ? ' completed' : ''}${isOverdue ? ' overdue' : ''}`}
-              onClick={() => job && (setPreviousSection('profil'), setSelectedJobId(job.id), setActiveSection('job_detail'))}
-              style={{ cursor: job ? 'pointer' : 'default' }}
-            >
-              <div style={{ flex: 1 }}>
-                <div style={{ fontWeight: 600, fontSize: 14 }}>{task.name}</div>
-                {job && <div style={{ fontSize: 12, color: '#1976d2', marginTop: 2 }}>📁 {job.name}</div>}
-                {job?.client_name && <div style={{ fontSize: 12, color: '#555', marginTop: 1 }}>👤 <strong>{job.client_name}</strong></div>}
-                {task.description && <div style={{ fontSize: 12, color: '#777', marginTop: 3 }}>{task.description}</div>}
-              </div>
-              <div style={{ textAlign: 'right', flexShrink: 0, display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 5 }}>
-                {task.deadline && <div style={{ marginBottom: 2 }}>{dlBadge(task.deadline)}</div>}
-                <div style={{ fontSize: 11, padding: '2px 7px', borderRadius: 8, background: task.status === 'completed' ? '#e8f5e9' : task.status === 'stand_by' ? '#e3f2fd' : '#fff3e0', color: task.status === 'completed' ? '#2e7d32' : task.status === 'stand_by' ? '#1565c0' : '#e65100', fontWeight: 600 }}>{task.status === 'completed' ? 'Finalizat' : task.status === 'stand_by' ? 'Stand By' : 'În lucru'}</div>
-                {task.status !== 'completed' && (
-                  <button onClick={e => { e.stopPropagation(); toggleComplete(task) }} style={{ fontSize: 11, padding: '3px 8px', background: '#4caf50', color: 'white', border: 'none', borderRadius: 5, cursor: 'pointer' }}>✅ Finalizez</button>
-                )}
-              </div>
-            </div>
-          )
-        })}
+        <TaskExplorer tasks={myTasks} jobs={jobs} dlBadge={dlBadge} storageKey="profil-employee" onOpen={job => { setPreviousSection('profil'); setSelectedJobId(job.id); setActiveSection('job_detail') }}
+          renderActions={task => task.status !== 'completed' && (
+            <button onClick={e => { e.stopPropagation(); toggleComplete(task) }} style={{ fontSize: 11, padding: '3px 8px', background: '#4caf50', color: 'white', border: 'none', borderRadius: 5, cursor: 'pointer', whiteSpace: 'nowrap' }}>✅ Finalizez</button>
+          )} />
       </div>
     )
   }
@@ -431,8 +402,8 @@ const EmployeeDashboard = () => {
 
   const renderSection = (filteredJobs, title, icon) => (
     <div>
-      <div className="section-header"><h2 className="section-title">{icon} {title} <span style={{ fontSize: 14, fontWeight: 400, color: '#777' }}>({filteredJobs.length})</span></h2></div>
-      {renderJobList(filteredJobs)}
+      <div className="section-header"><h2 className="section-title">{icon} {title} <span style={{ fontSize: 14, fontWeight: 400, color: '#777' }}>({filteredJobs.filter(j => j.status !== 'completed').length} în lucru)</span></h2></div>
+      <JobExplorer jobs={filteredJobs} tasks={tasks} dlBadge={dlBadge} storageKey={`jobs-employee-${title}`} onOpen={job => { setPreviousSection(activeSection); setSelectedJobId(job.id); setActiveSection('job_detail') }} renderCards={rows => renderJobList(rows)} />
     </div>
   )
 
@@ -519,17 +490,17 @@ const EmployeeDashboard = () => {
 
         {activeSection === 'home' && renderHome()}
         {activeSection === 'profil' && renderProfil()}
-        {activeSection === 'lucrari' && renderSection(activeJobs, 'Toate Lucrările', '📁')}
-        {activeSection === 'lucrari/cadastru_sporadic' && renderSection(activeJobs.filter(j => j.category === 'cadastru_sporadic'), 'Cadastru Sporadic', '📍')}
-        {activeSection === 'lucrari/cadastru_sistematic' && renderSection(activeJobs.filter(j => j.category === 'cadastru_sistematic'), 'Cadastru Sistematic', '🗺️')}
-        {activeSection === 'lucrari/topografie' && renderSection(activeJobs.filter(j => j.category === 'topografie'), 'Topografie', '⛰️')}
+        {activeSection === 'lucrari' && renderSection(jobs, 'Toate Lucrările', '📁')}
+        {activeSection === 'lucrari/cadastru_sporadic' && renderSection(jobs.filter(j => j.category === 'cadastru_sporadic'), 'Cadastru Sporadic', '📍')}
+        {activeSection === 'lucrari/cadastru_sistematic' && renderSection(jobs.filter(j => j.category === 'cadastru_sistematic'), 'Cadastru Sistematic', '🗺️')}
+        {activeSection === 'lucrari/topografie' && renderSection(jobs.filter(j => j.category === 'topografie'), 'Topografie', '⛰️')}
         {activeSection === 'lucrari_finalizate' && (
           <div>
             <div className="section-header"><h2 className="section-title">✅ Lucrări Finalizate <span style={{ fontSize: 14, fontWeight: 400, color: '#777' }}>({completedJobs.length})</span></h2></div>
-            {renderJobList(completedJobs)}
+            <JobExplorer jobs={jobs} tasks={tasks} dlBadge={dlBadge} storageKey={"jobs-employee-finalizate"} onOpen={job => { setPreviousSection(activeSection); setSelectedJobId(job.id); setActiveSection('job_detail') }} renderCards={rows => renderJobList(rows)} defaultStatus="completed" />
           </div>
         )}
-        {activeSection === 'administrativ' && renderSection(activeJobs.filter(j => j.category === 'administrativ'), 'Administrativ', '📋')}
+        {activeSection === 'administrativ' && renderSection(jobs.filter(j => j.category === 'administrativ'), 'Administrativ', '📋')}
         {activeSection === 'calendar' && renderCalendar()}
         {activeSection === 'job_detail' && renderJobDetail()}
       </main>

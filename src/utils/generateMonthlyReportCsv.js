@@ -33,9 +33,40 @@ const getTaskCompleters = (task) => {
   return []
 }
 
+// Banii unui task se socotesc la persoanele CĂRORA LE-A FOST ALOCAT (nu la cine l-a bifat).
+// Excepție: taskurile libere (fără nimeni alocat) rămân la cine le-a bifat.
+// Aceleași funcții sunt folosite de tabelul Raport Lunar și de exportul Excel, ca să dea mereu același rezultat.
+const sameEmail = (a, b) => !!a && !!b && String(a).toLowerCase() === String(b).toLowerCase()
+const assignedIds = (task) => Array.isArray(task?.assigned_to) ? task.assigned_to : (task?.assigned_to ? [task.assigned_to] : [])
+const assignedEmails = (task) => Array.isArray(task?.assigned_to_emails) ? task.assigned_to_emails : []
+const isFreeTask = (task) => assignedIds(task).length === 0 && assignedEmails(task).length === 0
+
+export const isAssignedTo = (task, profile) => {
+  if (!task || !profile) return false
+  return assignedIds(task).includes(profile.id) || assignedEmails(task).some(e => sameEmail(e, profile.email))
+}
+
+const completerFor = (task, profile) =>
+  profile ? getTaskCompleters(task).find(c => c.id === profile.id || sameEmail(c.email, profile.email)) : null
+
+// Cui i se socotește taskul: celor alocați; la taskurile libere, celor care l-au bifat
+export const isCreditedTo = (task, profile) => (isFreeTask(task) ? !!completerFor(task, profile) : isAssignedTo(task, profile))
+
+// Partea persoanei: suma ei din împărțirea la finalizare, altfel valoarea împărțită la câți îl împart
+export const shareFor = (task, profile) => {
+  const mine = completerFor(task, profile)
+  if (mine && mine.amount != null && !Number.isNaN(parseFloat(mine.amount))) return parseFloat(mine.amount)
+  const people = isFreeTask(task) ? getTaskCompleters(task).length : Math.max(assignedIds(task).length, assignedEmails(task).length)
+  const value = parseFloat(task.value)
+  return (Number.isNaN(value) ? 0 : value) / Math.max(1, people)
+}
+
+export const doneDateFor = (task, profile) => toDateOrNull(completerFor(task, profile)?.completed_at) || getTaskCompletionDate(task)
+
 export function buildMonthlyReportData({ tasks = [], profiles = [], users = [], month, year }) {
   const start = new Date(year, month, 1)
   const end = new Date(year, month + 1, 1)
+  const inMonth = (d) => !!d && d >= start && d < end
   const profileMap = (profiles || []).reduce((map, profile) => {
     map[profile.id] = profile
     if (profile.email) map[profile.email] = profile
@@ -55,60 +86,29 @@ export function buildMonthlyReportData({ tasks = [], profiles = [], users = [], 
     return String(idOrEmail)
   }
 
-  const completedTasks = (tasks || []).filter(task => {
-    const completionDate = getTaskCompletionDate(task)
-    return completionDate ? completionDate >= start && completionDate < end : false
-  })
-
-  const agg = {}
-  for (const task of completedTasks) {
-    const completers = getTaskCompleters(task)
-    const value = (task.value != null && !Number.isNaN(parseFloat(task.value))) ? parseFloat(task.value) : 0
-
-    if (completers.length === 0) {
-      agg['(unknown)'] = agg['(unknown)'] || { count: 0, total: 0 }
-      agg['(unknown)'].count += 1
-      agg['(unknown)'].total += value
-      continue
-    }
-
-    for (const completer of completers) {
-      const key = completer.id || completer.email || '(unknown)'
-      agg[key] = agg[key] || { count: 0, total: 0 }
-      agg[key].count += 1
-      const amount = completer.amount != null ? parseFloat(completer.amount) : value
-      agg[key].total += Number.isNaN(amount) ? 0 : amount
-    }
-  }
+  const completedTasks = (tasks || []).filter(task => inMonth(getTaskCompletionDate(task)))
 
   const rows = []
-  const matchedKeys = new Set()
-
   for (const profile of (profiles || [])) {
-    const linkedUser = (users || []).find(user => user.email && user.email === profile.email) || null
-    const possibleKeys = [profile.id, profile.email, linkedUser && linkedUser.id, linkedUser && linkedUser.email].filter(Boolean)
-    const val = possibleKeys.map(key => agg[key]).find(Boolean) || { count: 0, total: 0 }
+    const mine = (tasks || []).filter(task => isCreditedTo(task, profile) && inMonth(doneDateFor(task, profile)))
     rows.push({
       assigned_to: profile.id,
       profile,
-      tasks: completedTasks.filter(task => {
-        const completers = getTaskCompleters(task)
-        return completers.some(c => possibleKeys.includes(c.id) || possibleKeys.includes(c.email))
-      }),
-      totalValue: val.total,
-      count: val.count
+      tasks: mine,
+      totalValue: mine.reduce((sum, task) => sum + shareFor(task, profile), 0),
+      count: mine.length
     })
-    possibleKeys.forEach(key => { if (agg[key]) matchedKeys.add(key) })
   }
 
-  for (const [key, val] of Object.entries(agg)) {
-    if (matchedKeys.has(key)) continue
+  // Taskuri finalizate în lună care nu se pot socoti nimănui din lista de profile primită
+  const unassigned = completedTasks.filter(task => !(profiles || []).some(p => isCreditedTo(task, p)))
+  if (unassigned.length > 0) {
     rows.push({
       assigned_to: null,
       profile: null,
-      tasks: completedTasks.filter(task => getTaskCompleters(task).some(c => (c.id || c.email || '(unknown)') === key)),
-      totalValue: val.total,
-      count: val.count
+      tasks: unassigned,
+      totalValue: unassigned.reduce((sum, task) => sum + (parseFloat(task.value) || 0), 0),
+      count: unassigned.length
     })
   }
 

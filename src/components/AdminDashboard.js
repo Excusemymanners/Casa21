@@ -2,8 +2,9 @@ import React, { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import * as XLSX from 'xlsx'
 import supabase from '../supabase-client'
-import { sendJobCompletionEmail, sendTaskCompletionEmail, areAllTasksCompleted } from '../emailService'
-import { buildMonthlyReportData, generateMonthlyReportCsv, downloadCsv } from '../utils/generateMonthlyReportCsv'
+import TaskExplorer from './TaskExplorer'
+import JobExplorer from './JobExplorer'
+import { buildMonthlyReportData, generateMonthlyReportCsv, downloadCsv, isCreditedTo, shareFor, doneDateFor } from '../utils/generateMonthlyReportCsv'
 import './AdminDashboard.css'
 import './DashboardSidebar.css'
 
@@ -52,6 +53,7 @@ const AdminDashboard = () => {
   const [clientCNP, setClientCNP] = useState('')
   const [clientAddress, setClientAddress] = useState('')
   const [jobCategory, setJobCategory] = useState('')
+  const [jobResponsible, setJobResponsible] = useState('')
   const [newJobTasks, setNewJobTasks] = useState([{ name: '', description: '', assigned_to: [], estimated_hours: '', value: '', deadline: '', noDeadline: false }])
 
   const [selectedJobId, setSelectedJobId] = useState(null)
@@ -71,7 +73,6 @@ const AdminDashboard = () => {
   const [taskDrafts, setTaskDrafts] = useState({})
   const [searchQuery, setSearchQuery] = useState('')
   const [expandedEmployees, setExpandedEmployees] = useState(new Set())
-  const [notifyingEmployees, setNotifyingEmployees] = useState({})
   const [dragOverTaskId, setDragOverTaskId] = useState(null)
   const [dragOverJobId, setDragOverJobId] = useState(null)
   const dragTaskRef = useRef(null)
@@ -185,6 +186,12 @@ const AdminDashboard = () => {
     return d.toLocaleDateString('ro-RO', { year: 'numeric', month: 'long', day: 'numeric' })
   }
 
+  const responsibleName = (id) => {
+    if (!id) return null
+    const p = (profiles || []).find(p => p.id === id)
+    return p ? (p.full_name || p.email) : null
+  }
+
   const MultiAssignSelector = ({ profiles, selectedIds = [], onChange }) => {
     const ids = Array.isArray(selectedIds) ? selectedIds : []
     const selectedProfiles = (profiles || []).filter(p => ids.includes(p.id))
@@ -243,7 +250,7 @@ const AdminDashboard = () => {
         client_cnp: clientCNP || null, client_address: clientAddress || null,
         client_email: clientemail || null, status: 'todo', created_by: user?.id || null,
         total_value: 0, order_number: jobOrderNumber ? parseInt(jobOrderNumber, 10) : null,
-        category: catValue
+        category: catValue, responsible_id: jobResponsible || null
       }
       let newJobData
       try {
@@ -285,7 +292,7 @@ const AdminDashboard = () => {
       if (sumTasks > 0) await supabase.from('jobs').update({ total_value: sumTasks }).eq('id', jobId)
 
       setJobNameType(''); setJobNameCustom(''); setClientname(''); setJobPriority('normal'); setClientIdSeries(''); setClientCNP(''); setClientAddress('')
-      setClientemail(''); setClientPhone(''); setJobOrderNumber(''); setJobCategory('')
+      setClientemail(''); setClientPhone(''); setJobOrderNumber(''); setJobCategory(''); setJobResponsible('')
       setNewJobTasks([{ name: '', description: '', assigned_to: [], estimated_hours: '', value: '', deadline: '', noDeadline: false }])
       setShowCreateWithTasks(false)
       setMessage('Job și taskuri create!'); setTimeout(() => setMessage(null), 3000)
@@ -302,7 +309,7 @@ const AdminDashboard = () => {
     const namedOptions = JOB_NAME_OPTIONS.filter(o => o !== 'Altele')
     const nameType = namedOptions.includes(job.name) ? job.name : 'Altele'
     const nameCustom = nameType === 'Altele' ? job.name : ''
-    setJobEdits({ nameType, nameCustom, priority: job.priority || 'normal', client_name: job.client_name, client_phone: job.client_phone || '', client_id_series: job.client_id_series || '', client_cnp: job.client_cnp || '', client_address: job.client_address || '', client_email: job.client_email || '', status: job.status, total_value: job.total_value ?? '', amount_paid: job.amount_paid ?? '', order_number: job.order_number ?? '', category: job.category || '' })
+    setJobEdits({ nameType, nameCustom, priority: job.priority || 'normal', client_name: job.client_name, client_phone: job.client_phone || '', client_id_series: job.client_id_series || '', client_cnp: job.client_cnp || '', client_address: job.client_address || '', client_email: job.client_email || '', status: job.status, total_value: job.total_value ?? '', amount_paid: job.amount_paid ?? '', order_number: job.order_number ?? '', category: job.category || '', responsible_id: job.responsible_id || '' })
     const jobTasks = tasks.filter(t => t.job_id === job.id)
     const drafts = {}
     jobTasks.forEach(t => {
@@ -329,6 +336,7 @@ const AdminDashboard = () => {
       if (f.client_cnp !== undefined) updates.client_cnp = f.client_cnp || null
       if (f.client_address !== undefined) updates.client_address = f.client_address || null
       if (f.category !== undefined) updates.category = f.category || null
+      if (f.responsible_id !== undefined) updates.responsible_id = f.responsible_id || null
 
       const { data, error: updErr } = await supabase.from('jobs').update(updates).eq('id', jobId).select()
       if (updErr) throw updErr
@@ -355,6 +363,7 @@ const AdminDashboard = () => {
       if (f.client_cnp !== undefined) jobUpdates.client_cnp = f.client_cnp || null
       if (f.client_address !== undefined) jobUpdates.client_address = f.client_address || null
       if (f.category !== undefined) jobUpdates.category = f.category || null
+      if (f.responsible_id !== undefined) jobUpdates.responsible_id = f.responsible_id || null
       const { data: jobData, error: jobErr } = await supabase.from('jobs').update(jobUpdates).eq('id', jobId).select()
       if (jobErr) throw jobErr
       setJobs(prev => prev.map(j => j.id === jobId ? jobData[0] : j))
@@ -493,7 +502,6 @@ const AdminDashboard = () => {
 
   const toggleComplete = async (task) => {
     const newStatus = task.status === 'completed' ? 'todo' : 'completed'
-    const job = jobs.find(j => j.id === task.job_id)
     let updates
     if (newStatus === 'completed') {
       const existing = Array.isArray(task.completers) ? task.completers.slice() : (task.completed_by ? [{ id: task.completed_by, email: task.completed_by_email, completed_at: task.completed_at }] : [])
@@ -518,15 +526,6 @@ const AdminDashboard = () => {
         const { data: freshJob } = await supabase.from('jobs').select().eq('id', task.job_id)
         if (freshJob && freshJob[0]) setJobs(prev => prev.map(j => j.id === task.job_id ? { ...j, ...freshJob[0] } : j))
       } catch (e) { console.warn('job refresh failed', e) }
-      if (newStatus === 'completed' && job?.client_email) {
-        try { await sendTaskCompletionEmail({ to: job.client_email, clientName: job.client_name, jobName: job.name, taskName: data[0].name, taskDescription: data[0].description, taskValue: data[0].value, completedAt: data[0].completed_at }) } catch (e) { console.warn(e) }
-        if (areAllTasksCompleted(updatedTasks, task.job_id)) {
-          const jobTasks = updatedTasks.filter(t => t.job_id === task.job_id)
-          const totalValue = jobTasks.reduce((s, t) => s + (parseFloat(t.value) || 0), 0)
-          const completedAt = new Date().toISOString()
-          try { await sendJobCompletionEmail({ to: job.client_email, clientName: job.client_name, jobName: job.name, tasks: jobTasks, totalValue, completedAt, clientCNP: job.client_cnp, clientSeries: job.client_id_series, clientAddress: job.client_address }) } catch (e) { console.error(e) }
-        }
-      }
     } catch (err) { setError(err.message) } finally { setLoading(false) }
   }
 
@@ -654,7 +653,7 @@ const AdminDashboard = () => {
   }
   const hasEventsOnDate = (date) => getTasksForDate(date).length > 0 || getJobsForDate(date).length > 0
   const navigateMonth = (dir) => setCurrentMonth(prev => { const d = new Date(prev); d.setMonth(d.getMonth() + dir); return d })
-  const navigateReportMonth = (dir) => setReportMonth(prev => { const d = new Date(prev); d.setMonth(d.getMonth() + dir); return d })
+  const navigateReportMonth = (dir) => setReportMonth(prev => new Date(prev.getFullYear(), prev.getMonth() + dir, 1))
 
   const handleLogout = () => {
     try { localStorage.removeItem('access_token') } catch (e) {}
@@ -663,7 +662,11 @@ const AdminDashboard = () => {
 
   const activeJobs = jobs.filter(j => j.status !== 'completed')
   const completedJobs = jobs.filter(j => j.status === 'completed')
+  // Un task e „de făcut” doar dacă nu e finalizat și nici lucrarea lui nu e finalizată (la fel ca în emailuri)
+  const isTaskOpen = (t) => t.status !== 'completed' && jobs.find(j => j.id === t.job_id)?.status !== 'completed'
   const currentUserProfile = profiles.find(p => p.email === user?.email) || null
+  // Raport Lunar: Admin vede doar statisticile lui. Lucrările le vede pe toate. CEO vede tot.
+  const myReportProfiles = currentUserProfile ? [currentUserProfile] : []
 
   const navItem = (section, icon, label, sub = false) => (
     <button
@@ -679,7 +682,7 @@ const AdminDashboard = () => {
   const renderHome = () => {
     const displayName = currentUserProfile?.full_name || user?.email || 'Admin'
     const items = [
-      { section: 'profil', icon: '👤', label: 'Profil', count: tasks.filter(t => { const a = Array.isArray(t.assigned_to) ? t.assigned_to : []; const ae = Array.isArray(t.assigned_to_emails) ? t.assigned_to_emails : []; return a.includes(currentUserProfile?.id) || ae.includes(user?.email) }).length },
+      { section: 'profil', icon: '👤', label: 'Profil', count: tasks.filter(t => { const a = Array.isArray(t.assigned_to) ? t.assigned_to : []; const ae = Array.isArray(t.assigned_to_emails) ? t.assigned_to_emails : []; return (a.includes(currentUserProfile?.id) || ae.includes(user?.email)) && isTaskOpen(t) }).length },
       { section: 'lucrari', icon: '📁', label: 'Toate Lucrările', count: activeJobs.length },
       { section: 'lucrari/cadastru_sporadic', icon: '📍', label: 'Cadastru Sporadic', count: activeJobs.filter(j => j.category === 'cadastru_sporadic').length },
       { section: 'lucrari/cadastru_sistematic', icon: '🗺️', label: 'Cadastru Sistematic', count: activeJobs.filter(j => j.category === 'cadastru_sistematic').length },
@@ -730,27 +733,7 @@ const AdminDashboard = () => {
           </div>
         </div>
         <h3 style={{ marginBottom: 12, color: '#333' }}>Subtaskuri asignate ({myTasks.length})</h3>
-        {myTasks.length === 0 ? <p style={{ color: '#6b7280' }}>Nu ai taskuri asignate momentan.</p> : myTasks.map(task => {
-          const job = jobs.find(j => j.id === task.job_id)
-          const isOverdue = task.deadline && new Date(task.deadline) < new Date() && task.status !== 'completed'
-          return (
-            <div key={task.id} className={`task-item-profil${task.status === 'completed' ? ' completed' : ''}${isOverdue ? ' overdue' : ''}`}
-              onClick={() => job && (setPreviousSection('profil'), setSelectedJobId(job.id), setActiveSection('job_detail'))}
-              style={{ cursor: job ? 'pointer' : 'default' }}
-            >
-              <div style={{ flex: 1 }}>
-                <div style={{ fontWeight: 600, fontSize: 14 }}>{task.name}</div>
-                {job && <div style={{ fontSize: 12, color: '#1976d2', marginTop: 2 }}>📁 {job.name}</div>}
-                {job?.client_name && <div style={{ fontSize: 12, color: '#555', marginTop: 1 }}>👤 <strong>{job.client_name}</strong></div>}
-                {task.description && <div style={{ fontSize: 12, color: '#777', marginTop: 3 }}>{task.description}</div>}
-              </div>
-              <div style={{ textAlign: 'right', flexShrink: 0 }}>
-                {task.deadline && <div style={{ marginBottom: 2 }}>{dlBadge(task.deadline)}</div>}
-                <div style={{ fontSize: 11, marginTop: 3, padding: '2px 7px', borderRadius: 8, display: 'inline-block', background: task.status === 'completed' ? '#e8f5e9' : task.status === 'stand_by' ? '#e3f2fd' : '#fff3e0', color: task.status === 'completed' ? '#2e7d32' : task.status === 'stand_by' ? '#1565c0' : '#e65100', fontWeight: 600 }}>{task.status === 'completed' ? 'Finalizat' : task.status === 'stand_by' ? 'Stand By' : 'În lucru'}</div>
-              </div>
-            </div>
-          )
-        })}
+        <TaskExplorer tasks={myTasks} jobs={jobs} dlBadge={dlBadge} storageKey="profil-admin" onOpen={job => { setPreviousSection('profil'); setSelectedJobId(job.id); setActiveSection('job_detail') }} />
       </div>
     )
   }
@@ -785,8 +768,8 @@ const AdminDashboard = () => {
     } catch (err) { console.error('reorder error', err) }
   }
 
-  const renderJobList = (filteredJobs) => {
-    const sorted = [...filteredJobs].sort((a, b) => {
+  const renderJobList = (filteredJobs, opts = {}) => {
+    const sorted = opts.keepOrder ? filteredJobs : [...filteredJobs].sort((a, b) => {
       if (a.sort_order != null && b.sort_order != null) return a.sort_order - b.sort_order
       if (a.sort_order != null) return -1
       if (b.sort_order != null) return 1
@@ -826,7 +809,7 @@ const AdminDashboard = () => {
             <div
               key={job.id}
               className="job-card"
-              draggable
+              draggable={opts.draggable !== false}
               onDragStart={(e) => { e.dataTransfer.effectAllowed = 'move'; dragJobRef.current = job.id }}
               onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; if (dragOverJobId !== job.id) setDragOverJobId(job.id) }}
               onDragLeave={() => setDragOverJobId(null)}
@@ -845,6 +828,7 @@ const AdminDashboard = () => {
                   {job.order_number && <span style={{ padding: '2px 8px', borderRadius: 5, fontSize: 11, color: 'white', background: '#2196f3' }}>Nr. {job.order_number}</span>}
                   {job.category && <span style={{ padding: '2px 8px', borderRadius: 5, fontSize: 11, color: '#555', background: '#e3f2fd' }}>{CATEGORY_LABELS[job.category] || job.category}</span>}
                   <strong style={{ color: '#333', fontSize: 13 }}>— {job.client_name}</strong>
+                  {job.responsible_id && <span style={{ padding: '2px 8px', borderRadius: 5, fontSize: 11, color: '#1b5e20', background: '#e8f5e9' }}>👷 {responsibleName(job.responsible_id) || 'Responsabil'}</span>}
                 </div>
                 <div style={{ fontSize: 12, color: '#555', display: 'flex', gap: 14, flexWrap: 'wrap', alignItems: 'center' }}>
                   <span>💰 <strong>{job.total_value != null ? parseFloat(job.total_value).toFixed(2) + ' lei' : 'N/A'}</strong></span>
@@ -924,6 +908,10 @@ const AdminDashboard = () => {
                   <option value="topografie">Topografie</option>
                   <option value="administrativ">Administrativ</option>
                 </select>
+                <select value={jobEdits.responsible_id || ''} onChange={e => setJobEdits(p => ({ ...p, responsible_id: e.target.value }))} style={{ flex: '1 1 200px', padding: '7px 10px', borderRadius: 6, border: '1px solid #ccc' }}>
+                  <option value="">-- Responsabil lucrare</option>
+                  {(profiles || []).map(p => <option key={p.id} value={p.id}>{displayUserLabel(p)}</option>)}
+                </select>
               </div>
               {jobEdits.nameType === 'Altele' && (
                 <input placeholder="Descrie tipul lucrării *" value={jobEdits.nameCustom || ''} onChange={e => setJobEdits(p => ({ ...p, nameCustom: e.target.value }))} style={{ padding: '7px 10px', borderRadius: 6, border: '1px solid #f59e0b', background: '#fffbeb' }} />
@@ -963,6 +951,7 @@ const AdminDashboard = () => {
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 12, fontSize: 13 }}>
                 <div><div style={{ color: '#888', fontSize: 11, marginBottom: 2 }}>Client</div><div style={{ fontWeight: 600 }}>{job.client_name || 'N/A'}</div></div>
+                <div><div style={{ color: '#888', fontSize: 11, marginBottom: 2 }}>Responsabil</div><div style={{ fontWeight: 600 }}>{responsibleName(job.responsible_id) || 'Nealocat'}</div></div>
                 <div><div style={{ color: '#888', fontSize: 11, marginBottom: 2 }}>Email</div><div>{job.client_email || 'N/A'}</div></div>
                 <div><div style={{ color: '#888', fontSize: 11, marginBottom: 2 }}>Telefon</div><div>{job.client_phone || 'N/A'}</div></div>
                 <div><div style={{ color: '#888', fontSize: 11, marginBottom: 2 }}>CNP</div><div>{job.client_cnp || 'N/A'}</div></div>
@@ -1094,13 +1083,13 @@ const AdminDashboard = () => {
     return (
       <div>
         <div className="section-header">
-          <h2 className="section-title">{icon} {title} <span style={{ fontSize: 14, fontWeight: 400, color: '#777' }}>({displayed.length})</span></h2>
+          <h2 className="section-title">{icon} {title} <span style={{ fontSize: 14, fontWeight: 400, color: '#777' }}>({displayed.filter(j => j.status !== 'completed').length} în lucru)</span></h2>
           <button onClick={() => { setJobCategory(defaultCat); setShowCreateWithTasks(true) }} style={{ padding: '9px 18px', background: '#16213e', color: 'white', border: 'none', borderRadius: 7, cursor: 'pointer', fontSize: 13, fontWeight: 600 }}>+ Crează Lucrare</button>
         </div>
         <div style={{ marginBottom: 12 }}>
           <input value={searchQuery} onChange={e => setSearchQuery(e.target.value)} placeholder="🔍 Caută după beneficiar sau tipul lucrării..." style={{ width: '100%', padding: '9px 13px', borderRadius: 8, border: '1px solid #d1d5db', fontSize: 13, boxSizing: 'border-box' }} />
         </div>
-        {renderJobList(displayed)}
+        <JobExplorer jobs={displayed} tasks={tasks} dlBadge={dlBadge} storageKey={`jobs-admin-${defaultCat || 'toate'}`} onOpen={job => { setPreviousSection(activeSection); setSelectedJobId(job.id); setActiveSection('job_detail') }} renderCards={(rows, opts) => renderJobList(rows, opts)} responsibleName={responsibleName} />
       </div>
     )
   }
@@ -1151,10 +1140,12 @@ const AdminDashboard = () => {
 
   const renderMonthlyReport = () => {
     const monthNames = ['Ianuarie','Februarie','Martie','Aprilie','Mai','Iunie','Iulie','August','Septembrie','Octombrie','Noiembrie','Decembrie']
-    const report = buildMonthlyReportData({ tasks, profiles, users, month: reportMonth.getMonth(), year: reportMonth.getFullYear() })
+    const fullReport = buildMonthlyReportData({ tasks, profiles: myReportProfiles, users, month: reportMonth.getMonth(), year: reportMonth.getFullYear() })
+    const myRows = fullReport.rows.filter(r => r.profile)
+    const report = { ...fullReport, rows: myRows, overallTotal: myRows.reduce((sum, r) => sum + r.totalValue, 0), totalTasks: myRows.reduce((sum, r) => sum + r.count, 0) }
     const exportCSV = async () => {
       try {
-        const csv = generateMonthlyReportCsv({ tasks, profiles, users, month: reportMonth.getMonth(), year: reportMonth.getFullYear() })
+        const csv = generateMonthlyReportCsv({ tasks, profiles: myReportProfiles, users, month: reportMonth.getMonth(), year: reportMonth.getFullYear() })
         downloadCsv(csv, `raport_${reportMonth.getFullYear()}_${String(reportMonth.getMonth()+1).padStart(2,'0')}.csv`)
       } catch (e) { setError(e.message) }
     }
@@ -1169,27 +1160,30 @@ const AdminDashboard = () => {
             <span style={{ marginLeft: 12, fontSize: 13, color: '#555' }}>Total: <strong>{report.totalTasks}</strong> taskuri | <strong>{report.overallTotal.toFixed(2)} lei</strong></span>
             <button onClick={() => {
               const wb = XLSX.utils.book_new()
-              const employees = profiles.filter(p => p.role === 'employee' || p.role === 'admin' || p.role === 'ceo')
+              const employees = myReportProfiles
               employees.forEach(emp => {
                 const empTasks = tasks.filter(t => { const a = Array.isArray(t.assigned_to) ? t.assigned_to : []; const ae = Array.isArray(t.assigned_to_emails) ? t.assigned_to_emails : []; return a.includes(emp.id) || ae.includes(emp.email) })
-                const empJobIds = [...new Set(empTasks.map(t => t.job_id))]
-                const empJobs = jobs.filter(j => empJobIds.includes(j.id))
-                const activeEmpJobs = empJobs.filter(j => j.status !== 'completed')
-                const completedEmpJobs = empJobs.filter(j => j.status === 'completed')
+                // Foaia fiecărui colaborator, pe luna aleasă: taskurile alocate lui (+ taskurile libere bifate de el).
+                // „Finalizat” = taskurile lui terminate în luna aleasă (intră în TOTAL); „În lucru” = ce mai are deschis azi (informativ).
+                const monthStart = new Date(reportMonth.getFullYear(), reportMonth.getMonth(), 1)
+                const monthEnd = new Date(reportMonth.getFullYear(), reportMonth.getMonth() + 1, 1)
+                const myShare = (t) => shareFor(t, emp)
+                const doneAt = (t) => doneDateFor(t, emp)
+                const doneInMonth = tasks.filter(t => isCreditedTo(t, emp) && doneAt(t) && doneAt(t) >= monthStart && doneAt(t) < monthEnd)
+                const open = empTasks.filter(t => t.status !== 'completed')
+                const byJob = (list) => [...new Set(list.map(t => t.job_id))].map(id => ({ j: jobs.find(jj => jj.id === id), myT: list.filter(t => t.job_id === id) })).filter(g => g.j)
+                const doneLines = byJob(doneInMonth).map(g => ({ ...g, value: g.myT.reduce((s, t) => s + myShare(t), 0), date: g.myT.map(doneAt).sort((a, b) => b - a)[0] }))
+                const openLines = byJob(open).map(g => ({ ...g, value: g.myT.reduce((s, t) => s + myShare(t), 0), date: g.myT.filter(t => t.deadline).map(t => new Date(t.deadline)).sort((a, b) => a - b)[0] }))
+                const line = (tip, l) => [tip, l.j.name, l.j.client_name || '', responsibleName(l.j.responsible_id) || '', l.myT.length, parseFloat(l.value.toFixed(2)), l.date ? l.date.toLocaleDateString('ro-RO') : '']
                 const rows = []
-                rows.push(['Tip', 'Lucrare', 'Client', 'Taskuri totale', 'Taskuri finalizate', 'Valoare totală (lei)', 'Deadline'])
-                activeEmpJobs.forEach(j => {
-                  const jt = tasks.filter(t => t.job_id === j.id)
-                  const myT = empTasks.filter(t => t.job_id === j.id)
-                  const deadline = myT.filter(t => t.deadline && t.status !== 'completed').sort((a,b)=>new Date(a.deadline)-new Date(b.deadline))[0]?.deadline
-                  rows.push(['În lucru', j.name, j.client_name || '', jt.length, jt.filter(t=>t.status==='completed').length, j.total_value || 0, deadline ? new Date(deadline).toLocaleDateString('ro-RO') : ''])
-                })
-                completedEmpJobs.forEach(j => {
-                  const jt = tasks.filter(t => t.job_id === j.id)
-                  rows.push(['Finalizat', j.name, j.client_name || '', jt.length, jt.filter(t=>t.status==='completed').length, j.total_value || 0, j.completed_at ? new Date(j.completed_at).toLocaleDateString('ro-RO') : ''])
-                })
+                rows.push([`Finalizate în ${reportMonth.toLocaleDateString('ro-RO', { month: 'long', year: 'numeric' })}`])
+                rows.push(['Tip', 'Lucrare', 'Client', 'Responsabil', 'Taskuri', 'Valoare (lei)', 'Finalizat la'])
+                doneLines.forEach(l => rows.push(line('Finalizat', l)))
+                rows.push(['', '', '', '', 'TOTAL LUNĂ:', parseFloat(doneLines.reduce((s, l) => s + l.value, 0).toFixed(2))])
                 rows.push([])
-                rows.push(['', '', '', '', '', 'TOTAL:', empJobs.reduce((s,j)=>s+(parseFloat(j.total_value)||0),0).toFixed(2)])
+                rows.push(['În lucru la zi (nu intră în total)'])
+                rows.push(['Tip', 'Lucrare', 'Client', 'Responsabil', 'Taskuri deschise', 'Valoare (lei)', 'Deadline'])
+                openLines.forEach(l => rows.push(line('În lucru', l)))
                 const ws = XLSX.utils.aoa_to_sheet(rows)
                 XLSX.utils.book_append_sheet(wb, ws, (emp.full_name || emp.email).slice(0, 31))
               })
@@ -1225,35 +1219,14 @@ const AdminDashboard = () => {
     const employees = profiles.filter(p => p.role === 'employee' || p.role === 'admin' || p.role === 'ceo')
     const toggleEmp = (id) => setExpandedEmployees(prev => { const s = new Set(prev); s.has(id) ? s.delete(id) : s.add(id); return s })
 
-    const notifyEmployee = async (e, emp) => {
-      e.stopPropagation()
-      if (notifyingEmployees[emp.id] === 'loading') return
-      setNotifyingEmployees(prev => ({ ...prev, [emp.id]: 'loading' }))
-      try {
-        const token = localStorage.getItem('access_token')
-        const res = await fetch('/api/notify-employee', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: token ? `Bearer ${token}` : '' },
-          body: JSON.stringify({ employeeId: emp.id, employeeEmail: emp.email })
-        })
-        const data = await res.json().catch(() => ({}))
-        if (!res.ok) throw new Error(data.error || 'Eroare server')
-        const state = data.sent === false ? 'no_tasks' : 'sent'
-        setNotifyingEmployees(prev => ({ ...prev, [emp.id]: state }))
-        setTimeout(() => setNotifyingEmployees(prev => { const n = { ...prev }; delete n[emp.id]; return n }), 3000)
-      } catch (err) {
-        setNotifyingEmployees(prev => ({ ...prev, [emp.id]: 'error' }))
-        setTimeout(() => setNotifyingEmployees(prev => { const n = { ...prev }; delete n[emp.id]; return n }), 3000)
-      }
-    }
 
     const exportEchipaExcel = () => {
       const wb = XLSX.utils.book_new()
       employees.forEach(emp => {
         const empTasks = tasks.filter(t => { const a = Array.isArray(t.assigned_to) ? t.assigned_to : []; const ae = Array.isArray(t.assigned_to_emails) ? t.assigned_to_emails : []; return a.includes(emp.id) || ae.includes(emp.email) })
-        const pending = empTasks.filter(t => t.status !== 'completed')
-        const rows = [['Task', 'Lucrare', 'Client', 'Valoare (lei)', 'Deadline', 'Status']]
-        pending.forEach(t => { const j = jobs.find(jj => jj.id === t.job_id); const statusLabel = t.status === 'stand_by' ? 'Stand By' : 'În lucru'; rows.push([t.name, j?.name || '', j?.client_name || '', t.value || '', t.deadline ? new Date(t.deadline).toLocaleDateString('ro-RO') : '', statusLabel]) })
+        const pending = empTasks.filter(isTaskOpen)
+        const rows = [['Task', 'Lucrare', 'Client', 'Responsabil', 'Valoare (lei)', 'Deadline', 'Status']]
+        pending.forEach(t => { const j = jobs.find(jj => jj.id === t.job_id); const statusLabel = t.status === 'stand_by' ? 'Stand By' : 'În lucru'; rows.push([t.name, j?.name || '', j?.client_name || '', responsibleName(j?.responsible_id) || '', t.value || '', t.deadline ? new Date(t.deadline).toLocaleDateString('ro-RO') : '', statusLabel]) })
         rows.push([], ['', '', '', 'Total valoare:', pending.reduce((s,t)=>s+(parseFloat(t.value)||0),0).toFixed(2), ''])
         const ws = XLSX.utils.aoa_to_sheet(rows)
         XLSX.utils.book_append_sheet(wb, ws, (emp.full_name || emp.email).slice(0, 31))
@@ -1269,7 +1242,7 @@ const AdminDashboard = () => {
         {employees.length === 0 && <p style={{ color: '#6b7280' }}>Nu sunt angajați.</p>}
         {employees.map(emp => {
           const empTasks = tasks.filter(t => { const a = Array.isArray(t.assigned_to) ? t.assigned_to : []; const ae = Array.isArray(t.assigned_to_emails) ? t.assigned_to_emails : []; return a.includes(emp.id) || ae.includes(emp.email) })
-          const pending = empTasks.filter(t => t.status !== 'completed')
+          const pending = empTasks.filter(isTaskOpen)
           const isOpen = expandedEmployees.has(emp.id)
           return (
             <div key={emp.id} style={{ background: 'white', borderRadius: 10, border: '1px solid #e5e7eb', marginBottom: 10, boxShadow: '0 1px 4px rgba(0,0,0,0.05)', overflow: 'hidden' }}>
@@ -1281,20 +1254,8 @@ const AdminDashboard = () => {
                 <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
                   <div style={{ textAlign: 'right', fontSize: 13 }}>
                     <span style={{ background: pending.length > 0 ? '#fff3e0' : '#e8f5e9', color: pending.length > 0 ? '#e65100' : '#2e7d32', padding: '2px 10px', borderRadius: 10, fontWeight: 700 }}>{pending.length} active</span>
-                    <span style={{ marginLeft: 6, background: '#e8f5e9', color: '#2e7d32', padding: '2px 10px', borderRadius: 10, fontWeight: 700 }}>{empTasks.filter(t => t.status === 'completed').length} finalizate</span>
+                    <span style={{ marginLeft: 6, background: '#e8f5e9', color: '#2e7d32', padding: '2px 10px', borderRadius: 10, fontWeight: 700 }}>{empTasks.filter(t => !isTaskOpen(t)).length} finalizate</span>
                   </div>
-                  {(() => {
-                    const ns = notifyingEmployees[emp.id]
-                    const btnLabel = ns === 'loading' ? '⏳ Se trimite...' : ns === 'sent' ? '✅ Trimis!' : ns === 'no_tasks' ? '✅ Fără taskuri' : ns === 'error' ? '❌ Eroare' : '🔔 Notifică'
-                    const btnColor = ns === 'sent' || ns === 'no_tasks' ? '#2e7d32' : ns === 'error' ? '#c62828' : '#e65100'
-                    return (
-                      <button
-                        onClick={(e) => notifyEmployee(e, emp)}
-                        disabled={ns === 'loading'}
-                        style={{ padding: '5px 12px', background: btnColor, color: 'white', border: 'none', borderRadius: 7, cursor: ns === 'loading' ? 'default' : 'pointer', fontSize: 12, fontWeight: 600, whiteSpace: 'nowrap', opacity: ns === 'loading' ? 0.7 : 1 }}
-                      >{btnLabel}</button>
-                    )
-                  })()}
                   <span style={{ fontSize: 18, color: '#374151' }}>{isOpen ? '▲' : '▼'}</span>
                 </div>
               </div>
@@ -1407,6 +1368,10 @@ const AdminDashboard = () => {
                 <option value="topografie">Topografie</option>
                 <option value="administrativ">Administrativ</option>
               </select>
+              <select value={jobResponsible} onChange={e => setJobResponsible(e.target.value)} style={{ flex: '1 1 200px', padding: '8px 11px', borderRadius: 6, border: '1px solid #ccc' }}>
+                  <option value="">-- Responsabil lucrare</option>
+                  {(profiles || []).map(p => <option key={p.id} value={p.id}>{displayUserLabel(p)}</option>)}
+                </select>
             </div>
             {jobNameType === 'Altele' && (
               <input placeholder="Descrie tipul lucrării *" value={jobNameCustom} onChange={e => setJobNameCustom(e.target.value)} required style={{ padding: '8px 11px', borderRadius: 6, border: '1px solid #f59e0b', background: '#fffbeb' }} />
@@ -1508,17 +1473,17 @@ const AdminDashboard = () => {
 
         {activeSection === 'home' && renderHome()}
         {activeSection === 'profil' && renderProfil()}
-        {activeSection === 'lucrari' && renderSection(activeJobs, 'Toate Lucrările', '📁', '')}
-        {activeSection === 'lucrari/cadastru_sporadic' && renderSection(activeJobs.filter(j => j.category === 'cadastru_sporadic'), 'Cadastru Sporadic', '📍', 'cadastru_sporadic')}
-        {activeSection === 'lucrari/cadastru_sistematic' && renderSection(activeJobs.filter(j => j.category === 'cadastru_sistematic'), 'Cadastru Sistematic', '🗺️', 'cadastru_sistematic')}
-        {activeSection === 'lucrari/topografie' && renderSection(activeJobs.filter(j => j.category === 'topografie'), 'Topografie', '⛰️', 'topografie')}
+        {activeSection === 'lucrari' && renderSection(jobs, 'Toate Lucrările', '📁', '')}
+        {activeSection === 'lucrari/cadastru_sporadic' && renderSection(jobs.filter(j => j.category === 'cadastru_sporadic'), 'Cadastru Sporadic', '📍', 'cadastru_sporadic')}
+        {activeSection === 'lucrari/cadastru_sistematic' && renderSection(jobs.filter(j => j.category === 'cadastru_sistematic'), 'Cadastru Sistematic', '🗺️', 'cadastru_sistematic')}
+        {activeSection === 'lucrari/topografie' && renderSection(jobs.filter(j => j.category === 'topografie'), 'Topografie', '⛰️', 'topografie')}
         {activeSection === 'lucrari_finalizate' && (
           <div>
             <div className="section-header"><h2 className="section-title">✅ Lucrări Finalizate <span style={{ fontSize: 14, fontWeight: 400, color: '#777' }}>({completedJobs.length})</span></h2></div>
-            {renderJobList(completedJobs)}
+            <JobExplorer jobs={jobs} tasks={tasks} dlBadge={dlBadge} storageKey={"jobs-admin-finalizate"} onOpen={job => { setPreviousSection(activeSection); setSelectedJobId(job.id); setActiveSection('job_detail') }} renderCards={(rows, opts) => renderJobList(rows, opts)} responsibleName={responsibleName} defaultStatus="completed" />
           </div>
         )}
-        {activeSection === 'administrativ' && renderSection(activeJobs.filter(j => j.category === 'administrativ'), 'Administrativ', '📋', 'administrativ')}
+        {activeSection === 'administrativ' && renderSection(jobs.filter(j => j.category === 'administrativ'), 'Administrativ', '📋', 'administrativ')}
         {activeSection === 'calendar' && renderCalendar()}
         {activeSection === 'echipa' && renderEchipa()}
         {activeSection === 'raport_lunar' && renderMonthlyReport()}

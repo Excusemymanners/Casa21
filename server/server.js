@@ -3,9 +3,6 @@ loadEnv()
 const express = require('express')
 const path = require('path')
 const bodyParser = require('body-parser')
-const cron = require('node-cron')
-const { sendDailyTasksEmails } = require('./daily-tasks-mailer')
-const { sendDeadlineReminderEmails } = require('./deadline-reminder-mailer')
 
 // Dynamically load API handlers from the repo's api/ folder
 const fs = require('fs')
@@ -70,17 +67,8 @@ function startServer() {
     console.error('Local API server failed to start:', err && err.message)
   })
 
-  // Daily task emails — 09:15 (timezone Europe/Bucharest)
-  cron.schedule('15 9 * * *', () => sendDailyTasksEmails().catch(e => console.error('[cron 09:15]', e)), { timezone: 'Europe/Bucharest' })
-  console.log('Daily task email scheduler started (09:15 Europe/Bucharest)')
+  // Emailurile automate au fost scoase complet — aplicația nu mai trimite niciun email.
 
-  // Deadline reminder emails — 10:00, 12:00, 14:00, 16:00 (Europe/Bucharest)
-  // Sends alerts when a task deadline is 1, 2, 3, or 5 days away
-  cron.schedule('0 10 * * *', () => sendDeadlineReminderEmails().catch(e => console.error('[cron 10:00]', e)), { timezone: 'Europe/Bucharest' })
-  cron.schedule('0 12 * * *', () => sendDeadlineReminderEmails().catch(e => console.error('[cron 12:00]', e)), { timezone: 'Europe/Bucharest' })
-  cron.schedule('0 14 * * *', () => sendDeadlineReminderEmails().catch(e => console.error('[cron 14:00]', e)), { timezone: 'Europe/Bucharest' })
-  cron.schedule('0 16 * * *', () => sendDeadlineReminderEmails().catch(e => console.error('[cron 16:00]', e)), { timezone: 'Europe/Bucharest' })
-  console.log('Deadline reminder email scheduler started (10:00, 12:00, 14:00, 16:00 Europe/Bucharest)')
 
   return server
 }

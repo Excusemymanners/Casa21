@@ -33,6 +33,30 @@ if ($ipOk) {
   Write-Info "Current IP: $current"
 }
 
+# Firewall: other PCs reach http://192.168.1.128:3000 only if Windows Firewall allows inbound TCP 3000
+# on every network profile (Windows may reclassify the LAN as Private/Public after an IP change,
+# and then the other computers get "This site can't be reached / took too long to respond").
+$FirewallRuleName = 'Overview app (port 3000)'
+$fwRule = Get-NetFirewallRule -DisplayName $FirewallRuleName -ErrorAction SilentlyContinue | Select-Object -First 1
+$fwOk = [bool]($fwRule -and $fwRule.Enabled -eq 'True' -and $fwRule.Action -eq 'Allow' -and $fwRule.Profile -eq 'Any')
+if ($fwOk) {
+  Write-Ok "Firewall rule already set: $FirewallRuleName"
+} else {
+  Write-WarnMsg 'Firewall rule for port 3000 is missing. Creating it (confirm the Administrator prompt)...'
+  try {
+    $fwScript = Join-Path $PSScriptRoot 'ALLOW-FIREWALL.ps1'
+    Start-Process -FilePath 'powershell.exe' -Verb RunAs -Wait -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$fwScript`""
+  } catch {
+    Write-WarnMsg 'Firewall rule was not created (Administrator prompt refused). Other computers may not reach the app.'
+  }
+  $fwRule = Get-NetFirewallRule -DisplayName $FirewallRuleName -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($fwRule -and $fwRule.Enabled -eq 'True') {
+    Write-Ok "Firewall rule set: $FirewallRuleName"
+  } else {
+    Write-WarnMsg 'Firewall rule still missing. Run ALLOW-FIREWALL.bat to fix access from other computers.'
+  }
+}
+
 # Node check
 $nodeCmd = Get-Command node -ErrorAction SilentlyContinue
 if (-not $nodeCmd) {
